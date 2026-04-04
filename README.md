@@ -13,6 +13,11 @@ brew install --HEAD zsh-flex-history
 echo 'source "$(brew --prefix)/share/zsh-flex-history/zsh-flex-history.zsh"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
+Optionally, to import your existing Zsh history into the custom SQLite history database, run:
+
+```bash
+zsh-flex-history-import
+
 ## Manual Setup
 
 ```bash
@@ -23,7 +28,6 @@ See zshrc file for how to modify your zshrc to auto run.
 
 ## Behavior
 
-- Loads history from `$HISTFILE` (or `~/.zsh_history`) on launch.
 - Uses in-order flexible fuzzy matching (similar to Emacs `flex`).
 - Shows a completing-read style vertical completion menu with highlighted match chars.
 - Prioritizes first-token matches (command completion and matching command prefixes) ahead of deeper in-string matches, then scores by recency and query fit.
