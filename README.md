@@ -4,39 +4,22 @@
 
 A modernized terminal UI for searching zsh history with Emacs-style `flex` fuzzy matching, full mouse support for setting point and related interactions, and syntax highlighting; in `.zshrc`, wire it via a `zle-line-init` hook (see zshrc file for how to exit the program and execute the command). It works in other shells too when invoked directly.
 
-## Run
+
+## Homebrew Install and Setup
+
+```bash
+brew tap uAlexk/tools
+brew install --HEAD zsh-flex-history
+echo 'source "$(brew --prefix)/share/zsh-flex-history/zsh-flex-history.zsh"' >> "${ZDOTDIR:-$HOME}/.zshrc"
+```
+
+## Manual Setup
 
 ```bash
 ./zsh_flex_history.py --use-custom-history --print-only
 ```
 
-## Homebrew Tap
-
-This repo includes a tap-ready formula at `Formula/zsh-flex-history.rb`.
-
-To publish it from your own custom tap:
-
-1. Create a tap repo named `homebrew-tools` on GitHub.
-2. Copy `Formula/zsh-flex-history.rb` into that tap repo under `Formula/`.
-3. Push both repos.
-4. Install with:
-
-```bash
-brew tap alex-903/tools
-brew install --HEAD zsh-flex-history
-```
-
-The formula currently uses `head` from the `main` branch, which is the simplest way to make a custom tap installable while the project is moving quickly. If you later want stable versioned installs, switch the formula to a GitHub release tarball plus `sha256`.
-
-## Zsh Setup
-
-After installing with Homebrew, add this one line to your `~/.zshrc`:
-
-```zsh
-source "$(brew --prefix)/share/zsh-flex-history/zsh-flex-history.zsh"
-```
-
-That sourced file will call the installed `zsh-flex-history` binary automatically.
+See zshrc file for how to modify your zshrc to auto run.
 
 ## Behavior
 
