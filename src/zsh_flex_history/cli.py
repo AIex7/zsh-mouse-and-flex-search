@@ -1282,7 +1282,8 @@ def launch_history_daemon(
 
     cmd = [
         sys.executable,
-        str(script_path),
+        "-m",
+        "zsh_flex_history.cli",
         "--daemon",
         "--history-file",
         str(history_path),
