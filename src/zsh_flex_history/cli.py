@@ -1775,9 +1775,6 @@ def render_result_line(
     query: str = "",
     unselected_white: bool = False,
     suffix_text: str = "",
-    connector: str = " ",
-    connector_active: bool = False,
-    connector_style_override: str = "",
     selector_glyph: str = SELECTOR_GLYPH,
 ) -> str:
     if width <= 0:
@@ -1809,13 +1806,10 @@ def render_result_line(
             match_style = style(fg=1, underline=True)
 
     selector_style = style(fg=2, bold=True) if item.runtime_completion else style(fg=1, bold=True)
-    connector_ch = connector[:1] or " "
-    connector_style = connector_style_override if connector_ch != " " else ""
-    connector_part = f"{connector_style}{connector_ch}{RESET}" if connector_style else connector_ch
     if selected:
-        gutter = f"{selector_style}{selector_glyph[:1] or SELECTOR_GLYPH}{RESET}{connector_part}"
+        gutter = f"{selector_style}{selector_glyph[:1] or SELECTOR_GLYPH}{RESET} "
     else:
-        gutter = f" {connector_part}"
+        gutter = "  "
 
     out: list[str] = []
     active_style = ""
@@ -1925,39 +1919,6 @@ def draw_panel(
     use_visible_total_for_more = top_remaining <= 97
     shared_result_width = max(1, min(result_render_width, RESULT_PREFIX_WIDTH + FIXED_MATCH_TEXT_WIDTH))
     visible_result_count = min(results_visible, max(0, len(results) - offset))
-    selected_visible_index = selected - offset if offset <= selected < (offset + visible_result_count) else None
-    connector_count = min(3, visible_result_count)
-    connector_start = 0
-    if selected_visible_index is not None and connector_count > 0:
-        connector_start = min(
-            max(0, selected_visible_index - 1),
-            max(0, visible_result_count - connector_count),
-        )
-    connector_end = connector_start + connector_count
-    selected_connector_style = ""
-    if selected_visible_index is not None and 0 <= selected < len(results):
-        selected_connector_style = style(fg=2, bold=True) if results[selected].runtime_completion else style(fg=1, bold=True)
-
-    def connector_for_visible_row(row_index: int) -> str:
-        if not (connector_start <= row_index < connector_end):
-            return " "
-        if selected_visible_index is None or not (connector_start <= selected_visible_index < connector_end):
-            return " "
-        if connector_count <= 1:
-            return " "
-        if row_index == selected_visible_index:
-            if row_index == connector_start:
-                return "╮"
-            if row_index == connector_end - 1:
-                return "╯"
-            return "┤"
-        if connector_start < selected_visible_index < (connector_end - 1):
-            if row_index == connector_start:
-                return "╭"
-            if row_index == connector_end - 1:
-                return "╰"
-        return "│"
-
     for i in range(results_visible):
         idx = offset + i
         if idx >= len(results):
@@ -1980,9 +1941,6 @@ def draw_panel(
             query=query,
             unselected_white=True,
             suffix_text="",
-            connector=connector_for_visible_row(i),
-            connector_active=idx == selected,
-            connector_style_override=selected_connector_style,
             selector_glyph="▷" if idx == selected and idx == (len(results) - 1) else SELECTOR_GLYPH,
         )
         result_lines.append(base_line)
