@@ -48,6 +48,29 @@ BASE16_TO_ANSI = {
     "base0F": 9,
 }
 
+ANSI_COLOR_NAMES = {
+    "black": 0,
+    "red": 1,
+    "green": 2,
+    "yellow": 3,
+    "blue": 4,
+    "magenta": 5,
+    "purple": 5,
+    "cyan": 6,
+    "white": 7,
+    "bright-black": 8,
+    "gray": 8,
+    "grey": 8,
+    "bright-red": 9,
+    "bright-green": 10,
+    "bright-yellow": 11,
+    "bright-blue": 12,
+    "bright-magenta": 13,
+    "bright-purple": 13,
+    "bright-cyan": 14,
+    "bright-white": 15,
+}
+
 DORIC = {
     "cursor": "#205798",
     "bg_main": "#fcf0e5",
@@ -86,6 +109,7 @@ class MatchResult:
     cwd: Optional[str] = None
     text_lower: Optional[str] = None
     runtime_completion: bool = False
+    failed: bool = False
 
 
 @dataclass
@@ -94,6 +118,7 @@ class HistoryEntry:
     cwd: Optional[str] = None
     text_lower: str = ""
     timestamp: Optional[str] = None
+    failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,6 +194,18 @@ def bg_code(slot: int) -> str:
     return "49"
 
 
+def ansi_color_from_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip().lower().replace("_", "-")
+    if not raw:
+        return default
+    if raw.isdigit():
+        value = int(raw)
+        if 0 <= value <= 15:
+            return value
+        return default
+    return ANSI_COLOR_NAMES.get(raw, default)
+
+
 def hex_to_rgb(value: str) -> tuple[int, int, int]:
     value = value.lstrip("#")
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
@@ -220,6 +257,7 @@ MAX_RETURNED_RESULTS = 100
 FIXED_MATCH_TEXT_WIDTH = 3000
 RESULT_PREFIX_WIDTH = 2
 SELECTOR_GLYPH = "✽"
+FAILED_SELECTOR_GLYPH = "◇"
 
 TERM_OUT = sys.stdout
 
@@ -409,8 +447,14 @@ def normalize_cwd_value(cwd: str) -> str:
     return os.path.normpath(stripped)
 
 
-def make_history_entry(text: str, *, cwd: Optional[str] = None, timestamp: Optional[str] = None) -> HistoryEntry:
-    return HistoryEntry(text=text, cwd=cwd, text_lower=text.lower(), timestamp=timestamp)
+def make_history_entry(
+    text: str,
+    *,
+    cwd: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    failed: bool = False,
+) -> HistoryEntry:
+    return HistoryEntry(text=text, cwd=cwd, text_lower=text.lower(), timestamp=timestamp, failed=failed)
 
 
 def load_history(path: Path) -> list[HistoryEntry]:
@@ -506,10 +550,14 @@ def ensure_custom_history_file(path: Path) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 command TEXT NOT NULL,
                 cwd TEXT NOT NULL,
-                timestamp TEXT NOT NULL
+                timestamp TEXT NOT NULL,
+                failed INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(custom_history)").fetchall()}
+        if "failed" not in columns:
+            conn.execute("ALTER TABLE custom_history ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_custom_history_command_cwd ON custom_history(command, cwd)"
         )
@@ -522,7 +570,7 @@ def ensure_custom_history_file(path: Path) -> None:
 def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list[HistoryEntry]:
     if not path.exists():
         return []
-    query = "SELECT command, cwd, timestamp FROM custom_history ORDER BY id DESC"
+    query = "SELECT command, cwd, timestamp, failed FROM custom_history ORDER BY id DESC"
     params: tuple[object, ...] = ()
     if limit is not None and limit > 0:
         query += " LIMIT ?"
@@ -539,13 +587,21 @@ def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list
         cmd = row[0]
         cwd = row[1]
         timestamp = row[2]
+        failed = row[3] if len(row) >= 4 else 0
         if not isinstance(cmd, str):
             continue
         normalized_cwd = normalize_cwd_value(cwd) if isinstance(cwd, str) else ""
         normalized_timestamp = timestamp if isinstance(timestamp, str) else None
         cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
         if cleaned.strip():
-            entries.append(make_history_entry(cleaned, cwd=normalized_cwd or None, timestamp=normalized_timestamp))
+            entries.append(
+                make_history_entry(
+                    cleaned,
+                    cwd=normalized_cwd or None,
+                    timestamp=normalized_timestamp,
+                    failed=bool(failed),
+                )
+            )
     return entries
 
 
@@ -563,13 +619,13 @@ def load_custom_history(
         return []
 
     existing_keys = {
-        (entry.timestamp, entry.text, entry.cwd)
+        (entry.timestamp, entry.text, entry.cwd, entry.failed)
         for entry in existing_history
         if entry.timestamp is not None
     }
     overlap_at: Optional[int] = None
     for idx, entry in enumerate(recent_entries):
-        if (entry.timestamp, entry.text, entry.cwd) in existing_keys:
+        if (entry.timestamp, entry.text, entry.cwd, entry.failed) in existing_keys:
             overlap_at = idx
             break
 
@@ -579,7 +635,7 @@ def load_custom_history(
     newer_entries = [
         entry
         for entry in recent_entries[:overlap_at]
-        if (entry.timestamp, entry.text, entry.cwd) not in existing_keys
+        if (entry.timestamp, entry.text, entry.cwd, entry.failed) not in existing_keys
     ]
     if not newer_entries:
         return existing_history
@@ -614,8 +670,65 @@ def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: s
                 (normalized_command, normalized_cwd),
             )
             conn.execute(
-                "INSERT INTO custom_history(command, cwd, timestamp) VALUES(?, ?, ?)",
+                "INSERT INTO custom_history(command, cwd, timestamp, failed) VALUES(?, ?, ?, 0)",
                 (normalized_command, normalized_cwd, timestamp),
+            )
+            conn.commit()
+    except (OSError, sqlite3.Error):
+        return False
+    return True
+
+
+def parse_iso_datetime(value: str) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def update_custom_history_exit_status(
+    path: Path,
+    command: str,
+    cwd: str,
+    status: int,
+    *,
+    max_age_seconds: int = 24 * 60 * 60,
+) -> bool:
+    normalized_command = command.strip()
+    normalized_cwd = normalize_cwd_value(cwd)
+    if not normalized_command:
+        return False
+
+    try:
+        ensure_custom_history_file(path)
+        with sqlite3.connect(path) as conn:
+            row = conn.execute(
+                """
+                SELECT id, timestamp
+                FROM custom_history
+                WHERE command = ? AND cwd = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (normalized_command, normalized_cwd),
+            ).fetchone()
+            if not isinstance(row, tuple) or len(row) < 2:
+                return False
+            row_id, timestamp = row
+            if not isinstance(row_id, int) or not isinstance(timestamp, str):
+                return False
+            parsed_timestamp = parse_iso_datetime(timestamp)
+            if parsed_timestamp is None:
+                return False
+            age = datetime.now(timezone.utc) - parsed_timestamp
+            if age.total_seconds() < 0 or age.total_seconds() > max_age_seconds:
+                return False
+            conn.execute(
+                "UPDATE custom_history SET failed = ? WHERE id = ?",
+                (1 if status != 0 else 0, row_id),
             )
             conn.commit()
     except (OSError, sqlite3.Error):
@@ -1029,6 +1142,7 @@ def search_history_only(
                     recency=-idx,
                     cwd=entry.cwd,
                     text_lower=entry.text_lower,
+                    failed=entry.failed,
                 )
             )
         if candidate_indices is None:
@@ -1052,6 +1166,7 @@ def search_history_only(
         m.recency = -idx
         m.cwd = entry.cwd
         m.text_lower = entry.text_lower
+        m.failed = entry.failed
         history_results.append(m)
 
     if result_limit is not None:
@@ -1198,6 +1313,7 @@ def match_result_to_payload(item: MatchResult) -> dict[str, Any]:
         "exact": item.exact,
         "recency": item.recency,
         "cwd": item.cwd,
+        "failed": item.failed,
     }
 
 
@@ -1210,6 +1326,7 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
     exact = payload.get("exact", False)
     recency = payload.get("recency", 0)
     cwd = payload.get("cwd")
+    failed = payload.get("failed", False)
     if not isinstance(text, str) or not isinstance(score, int) or not isinstance(positions, list):
         return None
     if cwd is not None and not isinstance(cwd, str):
@@ -1226,6 +1343,7 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
         exact=bool(exact),
         recency=int(recency) if isinstance(recency, int) else 0,
         cwd=cwd,
+        failed=bool(failed),
     )
 
 
@@ -1786,6 +1904,7 @@ def render_result_line(
     if width <= 0:
         return ""
 
+    result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", 1)
     gutter_width = RESULT_PREFIX_WIDTH
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
     body_width = max(0, width - gutter_width - suffix_width)
@@ -1803,16 +1922,20 @@ def render_result_line(
             match_style = style(fg=2, underline=True)
     else:
         if selected:
-            normal_style = RESET + style(fg=1, bold=True)
+            normal_style = RESET + style(fg=result_color, bold=True)
         else:
             normal_style = RESET
         if selected:
-            match_style = RESET + style(fg=1, bold=True, underline=True)
+            match_style = RESET + style(fg=result_color, bold=True, underline=True)
         else:
-            match_style = style(fg=1, underline=True)
+            match_style = style(fg=result_color, underline=True)
 
-    selector_style = style(fg=2, bold=True) if item.runtime_completion else style(fg=1, bold=True)
-    selector = selector_glyph[:1] or SELECTOR_GLYPH
+    if item.runtime_completion:
+        selector_style = style(fg=2, bold=True)
+    else:
+        selector_style = style(fg=result_color, bold=True)
+    selector_source = FAILED_SELECTOR_GLYPH if item.failed else selector_glyph
+    selector = selector_source[:1] or SELECTOR_GLYPH
     if selected:
         gutter = f"{selector_style}{selector}{RESET} "
     else:
@@ -3131,6 +3254,27 @@ def main() -> int:
         action="store_true",
         help="Use per-user SQLite history (command, cwd, timestamp).",
     )
+    parser.add_argument(
+        "--record-status",
+        action="store_true",
+        help=SUPPRESS,
+    )
+    parser.add_argument(
+        "--status-command",
+        default="",
+        help=SUPPRESS,
+    )
+    parser.add_argument(
+        "--status-code",
+        type=int,
+        default=0,
+        help=SUPPRESS,
+    )
+    parser.add_argument(
+        "--status-cwd",
+        default="",
+        help=SUPPRESS,
+    )
     args = parser.parse_args()
     try:
         history_length = parse_history_length_arg(str(args.history_length))
@@ -3148,6 +3292,18 @@ def main() -> int:
     else:
         history_path_value = args.history_file or os.environ.get("HISTFILE", str(Path.home() / ".zsh_history"))
         history_path = Path(history_path_value).expanduser()
+
+    if args.record_status:
+        if not args.use_custom_history:
+            print("zsh_flex_history: --record-status requires --use-custom-history", file=sys.stderr)
+            return 2
+        return 0 if update_custom_history_exit_status(
+            history_path,
+            args.status_command,
+            args.status_cwd or os.getcwd(),
+            args.status_code,
+        ) else 1
+
     socket_path = (
         Path(args.socket_path).expanduser()
         if args.socket_path

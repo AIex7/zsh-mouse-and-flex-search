@@ -7,14 +7,47 @@ A modernized terminal UI for searching zsh history with Emacs-style `flex` fuzzy
 
 ## Install and Setup
 
+Install from GitHub:
+
 ```bash
 uv tool install git+https://github.com/uAIex/zsh-mouse-and-flex-search
+zsh-flex-history-init-zsh >> "${ZDOTDIR:-$HOME}/.zshrc"
+```
+
+Or install from a local checkout:
+
+```bash
+git clone https://github.com/uAIex/zsh-mouse-and-flex-search
+cd zsh-mouse-and-flex-search
+uv tool install .
 zsh-flex-history-init-zsh >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
 Optionally, to import your existing Zsh history into the custom SQLite history database, run:
 
 `zsh-flex-history-import`
+
+## Uninstall
+
+Remove the installed tool:
+
+```bash
+uv tool uninstall zsh-flex-history
+```
+
+Then remove the block added by `zsh-flex-history-init-zsh` from `${ZDOTDIR:-$HOME}/.zshrc`:
+
+```zsh
+# Start: Automatically added by zsh-flex-history
+source "$HOME/.config/zsh-flex-history/hook.zsh"
+# End: Automatically added by zsh-flex-history
+```
+
+You can also remove the generated hook file:
+
+```bash
+rm "$HOME/.config/zsh-flex-history/hook.zsh"
+```
 
 ## Behavior
 
@@ -39,6 +72,10 @@ Optionally, to import your existing Zsh history into the custom SQLite history d
   - Does not delete rows from the SQLite file. Later daemon refreshes load normally without this cap.
 - `--print-only`
   - Prints the selected command to stdout instead of executing it.
+- `ZSH_FLEX_HISTORY_COLOR`
+  - Sets the ANSI color used for normal history results.
+  - Accepts `0`-`15` or names like `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, and `bright-blue`.
+  - Defaults to `red`.
 
 
 

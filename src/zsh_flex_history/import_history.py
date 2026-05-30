@@ -38,10 +38,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             command TEXT NOT NULL,
             cwd TEXT NOT NULL,
-            timestamp TEXT NOT NULL
+            timestamp TEXT NOT NULL,
+            failed INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(custom_history)").fetchall()}
+    if "failed" not in columns:
+        conn.execute("ALTER TABLE custom_history ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_custom_history_command_cwd ON custom_history(command, cwd)"
     )
