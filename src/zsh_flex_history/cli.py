@@ -1649,6 +1649,12 @@ def query_text_render_width(render_width: int, lead_cols: int = 1) -> int:
     return max(1, render_width - max(0, lead_cols))
 
 
+def terminal_safe_render_width(terminal_width: int, start_col: int) -> int:
+    # Avoid writing into the terminal's final column; doing so can arm
+    # autowrap and leave apparent blank rows after a resize.
+    return max(1, terminal_width - max(1, start_col))
+
+
 def query_window(query: str, cursor_pos: int, available: int) -> tuple[int, str]:
     if available <= 0:
         return 0, ""
@@ -1821,11 +1827,6 @@ def render_result_line(
             out.append(target_style if target_style else RESET)
             active_style = target_style
         out.append(ch)
-    pad_width = max(0, body_width - text_display_width(text))
-    if pad_width > 0:
-        if normal_style != active_style:
-            out.append(normal_style)
-        out.append(" " * pad_width)
     if suffix_text:
         if normal_style != active_style:
             out.append(normal_style)
@@ -1853,9 +1854,9 @@ def draw_panel(
     total_count: Optional[int] = None,
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
-    render_width = max(1, width - anchor_col + 1)
+    render_width = terminal_safe_render_width(width, anchor_col)
     result_anchor_col = max(1, anchor_col - 1)
-    result_render_width = max(1, width - result_anchor_col + 1)
+    result_render_width = terminal_safe_render_width(width, result_anchor_col)
 
     def draw_col_for_row(row_offset: int) -> int:
         if row_offset == 0:
@@ -2685,7 +2686,7 @@ def run(
                     term_size = tty_terminal_size(fd)
                     width = term_size.columns
                     term_lines = term_size.lines
-                    render_width = max(1, width - max(1, anchor_col) + 1)
+                    render_width = terminal_safe_render_width(width, anchor_col)
                     query_width = query_text_render_width(render_width)
                     required_query_rows = max(1, len(build_query_visual_rows(query, query_width)))
                     desired_panel_rows = max(min_panel_rows, required_query_rows + min_result_rows)
