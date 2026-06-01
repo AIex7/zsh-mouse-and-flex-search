@@ -66,8 +66,9 @@ rm "$HOME/.config/zsh-flex-history/hook.zsh"
   - Stores commands as UTF-8 text by default, unlike zsh
   - Includes extra metadata per entry (`command`, `cwd`, `timestamp`).
 - `--history-length <N>`
-  - Maximum number of SQLite history rows to load on the daemon's initial startup from the custom history DB (default: `10k`).
+  - Maximum number of SQLite history rows to load on the daemon's initial startup from the custom history DB.
   - Accepts values like `10000` or `10k`.
+  - If omitted, all custom history rows are loaded.
   - Applies only to `--use-custom-history` and only on the daemon's first load; normal `~/.zsh_history` is not trimmed.
   - Does not delete rows from the SQLite file. Later daemon refreshes load normally without this cap.
 - `--print-only`

@@ -1402,7 +1402,7 @@ def launch_history_daemon(
     history_path: Path,
     socket_path: Path,
     *,
-    history_length: int,
+    history_length: Optional[int],
     use_custom_history: bool = False,
 ) -> bool:
     try:
@@ -1419,9 +1419,9 @@ def launch_history_daemon(
         str(history_path),
         "--socket-path",
         str(socket_path),
-        "--history-length",
-        str(history_length),
     ]
+    if history_length is not None:
+        cmd.extend(["--history-length", str(history_length)])
     if use_custom_history:
         cmd.append("--use-custom-history")
     try:
@@ -1446,7 +1446,7 @@ class HistoryDaemonClient:
         script_path: Path,
         *,
         debug: bool = False,
-        history_length: int = 10_000,
+        history_length: Optional[int] = None,
         use_custom_history: bool = False,
     ) -> None:
         self.socket_path = socket_path
@@ -1613,7 +1613,7 @@ def run_history_daemon(
     socket_path: Path,
     *,
     debug: bool = False,
-    history_length: int = 10_000,
+    history_length: Optional[int] = None,
     use_custom_history: bool = False,
 ) -> int:
     if use_custom_history:
@@ -3355,7 +3355,7 @@ def main() -> int:
     parser.add_argument("--history-file", default="", help=SUPPRESS)
     parser.add_argument(
         "--history-length",
-        default="10k",
+        default=None,
         help="Maximum SQLite history rows to load on initial custom-history startup (for example: 10000 or 10k).",
     )
     parser.add_argument(
@@ -3395,11 +3395,13 @@ def main() -> int:
         help=SUPPRESS,
     )
     args = parser.parse_args()
-    try:
-        history_length = parse_history_length_arg(str(args.history_length))
-    except ValueError as exc:
-        print(f"zsh_flex_history: {exc}", file=sys.stderr)
-        return 2
+    history_length: Optional[int] = None
+    if args.history_length is not None:
+        try:
+            history_length = parse_history_length_arg(str(args.history_length))
+        except ValueError as exc:
+            print(f"zsh_flex_history: {exc}", file=sys.stderr)
+            return 2
 
     if args.use_custom_history:
         history_path = default_custom_history_path()
