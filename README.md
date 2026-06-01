@@ -80,6 +80,9 @@ rm "$HOME/.config/zsh-flex-history/hook.zsh"
   - Sets the ANSI color used for runtime completions.
   - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`.
   - Defaults to `green`.
+- `ZSH_FLEX_HISTORY_RESIZE_DEBOUNCE_MS`
+  - Sets how long to wait after a terminal resize before recalculating the panel position.
+  - Defaults to `100`.
 
 
 

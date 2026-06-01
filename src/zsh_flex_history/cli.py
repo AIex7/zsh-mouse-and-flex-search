@@ -9,6 +9,7 @@ import queue
 import re
 import select
 import shlex
+import signal
 import shutil
 import socket
 import sqlite3
@@ -204,6 +205,17 @@ def ansi_color_from_env(name: str, default: int) -> int:
             return value
         return default
     return ANSI_COLOR_NAMES.get(raw, default)
+
+
+def int_from_env(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
 
 
 def hex_to_rgb(value: str) -> tuple[int, int, int]:
@@ -2087,15 +2099,38 @@ def draw_panel(
     return query_start, query_view_len, query_rows_used, results_visible
 
 
-def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
+def read_key(fd: int, timeout: Optional[float] = 0.1, wake_fd: Optional[int] = None) -> tuple[str, object]:
+    def drain_wake_fd() -> None:
+        if wake_fd is None:
+            return
+        try:
+            while os.read(wake_fd, 4096):
+                pass
+        except BlockingIOError:
+            pass
+        except OSError:
+            pass
+
+    def select_input(wait_timeout: Optional[float]) -> tuple[bool, bool]:
+        read_fds = [fd]
+        if wake_fd is not None:
+            read_fds.append(wake_fd)
+        ready, _, _ = select.select(read_fds, [], [], wait_timeout)
+        resized = wake_fd is not None and wake_fd in ready
+        if resized:
+            drain_wake_fd()
+        return fd in ready, resized
+
     def read_escape_tail() -> bytes:
         # Read an escape sequence byte-by-byte so we do not over-read into
         # subsequent pasted payload bytes.
         seq = b""
         deadline = time.monotonic() + 0.05
         while time.monotonic() < deadline:
-            rdy, _, _ = select.select([fd], [], [], 0.01)
-            if not rdy:
+            has_input, resized = select_input(0.01)
+            if resized and not has_input:
+                break
+            if not has_input:
                 if seq:
                     break
                 continue
@@ -2240,8 +2275,10 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
         return bytes(buf).decode("utf-8", errors="replace")
 
     while True:
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
+        has_input, resized = select_input(timeout)
+        if resized and not has_input:
+            return "resize", None
+        if not has_input:
             return "timeout", None
         data = os.read(fd, 1)
         if not data:
@@ -2391,6 +2428,39 @@ def run(
         return None
     min_result_rows = 3
     min_panel_rows = 1 + min_result_rows
+    resize_pending = False
+    resize_debounce_seconds = int_from_env("ZSH_FLEX_HISTORY_RESIZE_DEBOUNCE_MS", 100, minimum=0) / 1000.0
+    resize_deadline: Optional[float] = None
+    resize_read_fd: Optional[int] = None
+    resize_write_fd: Optional[int] = None
+    previous_sigwinch_handler: Any = None
+    previous_wakeup_fd = -1
+
+    def handle_sigwinch(signum: int, frame: object) -> None:
+        nonlocal resize_pending, resize_deadline
+        resize_pending = True
+        resize_deadline = time.monotonic() + resize_debounce_seconds
+
+    try:
+        resize_read_fd, resize_write_fd = os.pipe()
+        os.set_blocking(resize_read_fd, False)
+        os.set_blocking(resize_write_fd, False)
+        previous_sigwinch_handler = signal.getsignal(signal.SIGWINCH)
+        previous_wakeup_fd = signal.set_wakeup_fd(resize_write_fd)
+        signal.signal(signal.SIGWINCH, handle_sigwinch)
+    except (AttributeError, OSError, ValueError):
+        if resize_read_fd is not None:
+            try:
+                os.close(resize_read_fd)
+            except OSError:
+                pass
+        if resize_write_fd is not None:
+            try:
+                os.close(resize_write_fd)
+            except OSError:
+                pass
+        resize_read_fd = None
+        resize_write_fd = None
 
     try:
         with RawTerminal(fd) as rt:
@@ -2600,7 +2670,7 @@ def run(
             search_thread = threading.Thread(target=search_worker, daemon=True)
             search_thread.start()
 
-            def refresh_anchor_from_cursor() -> None:
+            def refresh_anchor_from_cursor(*, trust_current_position: bool = False) -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
                 nonlocal initial_cursor_row, initial_cursor_col
                 old_anchor_row = anchor_row
@@ -2614,7 +2684,7 @@ def run(
                 if pos is None:
                     next_start_row = max(1, term_lines - 1)
                     next_start_col = 1
-                elif pos[0] == 1:
+                elif trust_current_position or pos[0] == 1:
                     next_start_row = pos[0]
                     next_start_col = pos[1]
                     initial_cursor_row = next_start_row
@@ -2806,6 +2876,23 @@ def run(
                             elif kind == "error":
                                 history_loading = False
                                 history_load_error = True
+
+                    pending_event: Optional[tuple[str, object]] = None
+                    now = time.monotonic()
+                    if resize_pending and resize_deadline is not None:
+                        if now >= resize_deadline:
+                            resize_pending = False
+                            resize_deadline = None
+                            refresh_anchor_from_cursor(trust_current_position=True)
+                            continue
+                        ev, payload = read_key(
+                            fd,
+                            timeout=max(0.0, resize_deadline - now),
+                            wake_fd=resize_read_fd,
+                        )
+                        if ev in ("timeout", "resize"):
+                            continue
+                        pending_event = (ev, payload)
     
                     term_size = tty_terminal_size(fd)
                     width = term_size.columns
@@ -2914,10 +3001,15 @@ def run(
                     )
                     last_drawn_panel_rows = panel_rows
 
-                    input_timeout: Optional[float] = 0.03
-                    if not history_loading and queued_search_key is None:
-                        input_timeout = None
-                    ev, payload = read_key(fd, timeout=input_timeout)
+                    if pending_event is None:
+                        input_timeout: Optional[float] = 0.03
+                        if not history_loading and queued_search_key is None:
+                            input_timeout = None
+                        ev, payload = read_key(fd, timeout=input_timeout, wake_fd=resize_read_fd)
+                        if ev == "resize":
+                            continue
+                    else:
+                        ev, payload = pending_event
                     if ev == "timeout":
                         continue
     
@@ -3218,6 +3310,26 @@ def run(
             clear_panel_and_restore_cursor()
             return chosen
     finally:
+        if resize_write_fd is not None:
+            try:
+                signal.set_wakeup_fd(previous_wakeup_fd)
+            except (OSError, ValueError):
+                pass
+        if previous_sigwinch_handler is not None:
+            try:
+                signal.signal(signal.SIGWINCH, previous_sigwinch_handler)
+            except (OSError, ValueError):
+                pass
+        if resize_read_fd is not None:
+            try:
+                os.close(resize_read_fd)
+            except OSError:
+                pass
+        if resize_write_fd is not None:
+            try:
+                os.close(resize_write_fd)
+            except OSError:
+                pass
         TERM_OUT = sys.stdout
         if tty_in_file is not None:
             tty_in_file.close()
