@@ -2650,11 +2650,8 @@ def run(
                 return matched_indices, resolved_results, matched_count, total_count, search_error
 
             def search_worker() -> None:
-                while not search_stop.is_set():
-                    try:
-                        request = search_requests.get(timeout=0.05)
-                    except queue.Empty:
-                        continue
+                while True:
+                    request = search_requests.get()
                     if request is None:
                         break
                     query_text, candidate_indices, cwd_text = request
