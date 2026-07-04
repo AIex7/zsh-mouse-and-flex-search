@@ -11,7 +11,7 @@ Install from GitHub:
 
 ```bash
 uv tool install git+https://github.com/uAIex/zsh-mouse-and-flex-search
-zsh-flex-history-init-zsh >> "${ZDOTDIR:-$HOME}/.zshrc"
+printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
 Or install from a local checkout:
@@ -20,7 +20,7 @@ Or install from a local checkout:
 git clone https://github.com/uAIex/zsh-mouse-and-flex-search
 cd zsh-mouse-and-flex-search
 uv tool install .
-zsh-flex-history-init-zsh >> "${ZDOTDIR:-$HOME}/.zshrc"
+printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
 Optionally, to import your existing Zsh history into the custom SQLite history database, run:
@@ -35,18 +35,10 @@ Remove the installed tool:
 uv tool uninstall zsh-flex-history
 ```
 
-Then remove the block added by `zsh-flex-history-init-zsh` from `${ZDOTDIR:-$HOME}/.zshrc`:
+Then remove this line from `${ZDOTDIR:-$HOME}/.zshrc`:
 
 ```zsh
-# Start: Automatically added by zsh-flex-history
-source "$HOME/.config/zsh-flex-history/hook.zsh"
-# End: Automatically added by zsh-flex-history
-```
-
-You can also remove the generated hook file:
-
-```bash
-rm "$HOME/.config/zsh-flex-history/hook.zsh"
+eval "$(zsh-flex-history-init-zsh --hook)"
 ```
 
 ## Behavior
