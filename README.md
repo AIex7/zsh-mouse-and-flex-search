@@ -1,6 +1,6 @@
 # zsh mouse and flex history search
 
-![zsh flex history screenshot](./screenshot.png)
+![zsh flex history screenshot](./demo.png)
 
 Use the mouse to edit commands in your terminal just like regular text, drag and select, overwrite by typing. Automatically search zsh history with flexible priority fuzzy matching, and syntax highlighting. It works in other shells too when invoked directly.
 
