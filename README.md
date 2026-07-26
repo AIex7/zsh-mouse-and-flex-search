@@ -1,6 +1,6 @@
 # zsh mouse and flex history search
 
-![zsh flex history screenshot](./screenshot.png)
+![zsh flex history screenshot](./demo.png)
 
 Use the mouse to edit commands in your terminal just like regular text, drag and select, overwrite by typing. Automatically search zsh history with flexible priority fuzzy matching, and syntax highlighting. It works in other shells too when invoked directly.
 
@@ -44,6 +44,7 @@ eval "$(zsh-flex-history-init-zsh --hook)"
 ## Behavior
 
 - Uses in-order flexible fuzzy matching (similar to Emacs `flex`).
+- Failed commands show with a ◇ character
 - Shows a completing-read style vertical completion menu with highlighted match chars.
 - Prioritizes first-token matches (command completion and matching command prefixes) ahead of deeper in-string matches, then scores by recency and query fit.
 - For directory-aware prioritization, use `--use-custom-history` so history scoring can include current `cwd`, which improves relevance for repeated workflows per folder.
