@@ -935,6 +935,17 @@ def shell_escape_fragment(text: str) -> str:
     return "".join(escaped)
 
 
+def shell_escape_quoted_fragment(text: str, quote: str) -> str:
+    """Escape text for insertion inside an existing shell-quoted token."""
+    if quote == "'":
+        # A literal single quote closes the current string, emits an escaped
+        # quote, then opens a new single-quoted string.
+        return text.replace("'", "'\\\\''")
+    # Within double quotes, spaces are literal. Only these characters retain
+    # special meaning to the shell and need escaping.
+    return "".join("\\\\" + ch if ch in ('\\\\', '"', '$', '`') else ch for ch in text)
+
+
 def replace_query_token(query: str, cursor_pos: int, replacement: str) -> str:
     start, end = token_bounds(query, cursor_pos)
     return query[:start] + replacement + query[end:]
@@ -977,6 +988,7 @@ def runtime_completion_matches(
 
     start, end = token_bounds(query, cursor_pos)
     raw_token = query[start:end]
+    quote, _closes_quote = enclosing_quote(raw_token)
     stripped = strip_enclosing_quotes(raw_token)
     if not stripped:
         return []
@@ -1047,7 +1059,12 @@ def runtime_completion_matches(
 
     runtime_matches: list[MatchResult] = []
     for chosen in chosen_entries:
-        completed_token = shell_escape_fragment(completed_prefix + chosen.name + ("/" if chosen.is_dir else ""))
+        completed_value = completed_prefix + chosen.name + ("/" if chosen.is_dir else "")
+        if quote is not None:
+            completed_token = quote + shell_escape_quoted_fragment(completed_value, quote)
+            completed_token += quote
+        else:
+            completed_token = shell_escape_fragment(completed_value)
         completed_query = replace_query_token(query, cursor_pos, completed_token)
         if completed_query == query:
             continue
@@ -1055,9 +1072,9 @@ def runtime_completion_matches(
         completed_query_lower = completed_query.lower()
         completed_match = flex_match(query, completed_query, candidate_lower=completed_query_lower)
         completed_positions = completed_match.positions if completed_match is not None else []
-        token_match = flex_match(token_prefix, completed_token, candidate_lower=completed_token.lower())
+        token_match = flex_match(token_prefix, completed_value, candidate_lower=completed_value.lower())
         if token_match is not None:
-            completed_positions = [start + pos for pos in token_match.positions]
+            completed_positions = [start + (1 if quote is not None else 0) + pos for pos in token_match.positions]
 
         runtime_matches.append(
             MatchResult(
@@ -3032,9 +3049,14 @@ def run(
                         if not query:
                             refresh_anchor_from_cursor()
                         if 0 <= selected < len(results):
-                            preferred_runtime_row = 0 if results[selected].runtime_completion else None
-                            query = results[selected].text
+                            selected_result = results[selected]
+                            preferred_runtime_row = 0 if selected_result.runtime_completion else None
+                            token_start, token_end = token_bounds(query, cursor_pos)
+                            quote, closes_quote = enclosing_quote(query[token_start:token_end])
+                            query = selected_result.text
                             cursor_pos = len(query)
+                            if selected_result.runtime_completion and quote is not None and not closes_quote:
+                                cursor_pos = max(0, len(query) - 1)
                             clear_selection()
                             sync_mouse_mode()
                             if preferred_runtime_row is None:
