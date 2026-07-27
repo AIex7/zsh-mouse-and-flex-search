@@ -2405,7 +2405,8 @@ def run(
     inline_with_prompt: bool = False,
     history_updates: Optional[queue.Queue[tuple[str, object]]] = None,
     history_client: Optional[HistoryDaemonClient] = None,
-) -> Optional[str]:
+    empty_space_command: Optional[str] = None,
+) -> Optional[tuple[str, bool]]:
     global TERM_OUT
     tty_in_file = None
     tty_out_file = None
@@ -2535,6 +2536,7 @@ def run(
 
             query = ""
             cursor_pos = 0
+            skip_history_record = False
             sel_anchor: Optional[int] = None
             sel_end: Optional[int] = None
             selected = 0
@@ -3181,6 +3183,10 @@ def run(
                         continue
                     if ev == "char":
                         ch = str(payload)
+                        if ch == " " and not query and empty_space_command is not None:
+                            chosen = empty_space_command
+                            skip_history_record = True
+                            break
                         if not query:
                             refresh_anchor_from_cursor()
                         sel = selection_bounds(sel_anchor, sel_end)
@@ -3336,7 +3342,9 @@ def run(
                 search_requests.put(None)
 
             clear_panel_and_restore_cursor()
-            return chosen
+            if chosen is None:
+                return None
+            return chosen, skip_history_record
     finally:
         if resize_write_fd is not None:
             try:
@@ -3371,6 +3379,11 @@ def main() -> int:
         "--print-only",
         action="store_true",
         help="Print selected command to stdout instead of executing it.",
+    )
+    parser.add_argument(
+        "--no-save-history",
+        action="store_true",
+        help="Do not add the selected command to custom history.",
     )
     parser.add_argument("--daemon", action="store_true", help=SUPPRESS)
     parser.add_argument("--socket-path", default="", help=SUPPRESS)
@@ -3483,17 +3496,22 @@ def main() -> int:
         print("zsh_flex_history: --no-shared-daemon is not supported (no local fallback enabled)", file=sys.stderr)
         return 1
 
-    selected = run(
+    empty_space_command = os.environ.get("ZSH_FLEX_HISTORY_EMPTY_SPACE_COMMAND")
+    if empty_space_command is not None and not empty_space_command.strip():
+        empty_space_command = None
+    selection = run(
         [],
         inline_with_prompt=args.print_only,
         history_updates=history_updates,
         history_client=history_client,
+        empty_space_command=empty_space_command,
     )
-    if selected:
+    if selection is not None:
+        selected, skip_history_record = selection
         selected = selected.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         if not selected.strip():
             return 1
-        if args.use_custom_history:
+        if args.use_custom_history and not args.no_save_history and not skip_history_record:
             append_custom_history_entry(
                 history_path,
                 selected,

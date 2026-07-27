@@ -66,6 +66,11 @@ eval "$(zsh-flex-history-init-zsh --hook)"
   - Does not delete rows from the SQLite file. Later daemon refreshes load normally without this cap.
 - `--print-only`
   - Prints the selected command to stdout instead of executing it.
+- `--no-save-history`
+  - Does not add the selected command to custom history.
+- `ZSH_FLEX_HISTORY_EMPTY_SPACE_COMMAND`
+  - When set to a non-empty command, pressing Space with an empty query accepts and runs that command immediately.
+  - The command is never added to custom history.
 - `ZSH_FLEX_HISTORY_COLOR`
   - Sets the ANSI color used for normal history results.
   - Accepts `0`-`15` or names like `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, and `bright-blue`.
