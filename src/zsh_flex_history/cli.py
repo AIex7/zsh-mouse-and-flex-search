@@ -3052,10 +3052,10 @@ def run(
                             selected_result = results[selected]
                             preferred_runtime_row = 0 if selected_result.runtime_completion else None
                             token_start, token_end = token_bounds(query, cursor_pos)
-                            quote, closes_quote = enclosing_quote(query[token_start:token_end])
+                            quote, _closes_quote = enclosing_quote(query[token_start:token_end])
                             query = selected_result.text
                             cursor_pos = len(query)
-                            if selected_result.runtime_completion and quote is not None and not closes_quote:
+                            if selected_result.runtime_completion and quote is not None:
                                 cursor_pos = max(0, len(query) - 1)
                             clear_selection()
                             sync_mouse_mode()
