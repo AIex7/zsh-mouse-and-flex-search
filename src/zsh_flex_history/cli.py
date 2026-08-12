@@ -1126,11 +1126,11 @@ def runtime_completion_matches(
             continue
 
         completed_query_lower = completed_query.lower()
-        completed_match = flex_match(query, completed_query, candidate_lower=completed_query_lower)
-        completed_positions = completed_match.positions if completed_match is not None else []
-        token_match = flex_match(token_prefix, completed_value, candidate_lower=completed_value.lower())
-        if token_match is not None:
-            completed_positions = [start + (1 if quote is not None else 0) + pos for pos in token_match.positions]
+        # Match the shell-rendered token, including backslashes. Matching the
+        # unescaped path shifts every later highlight when a space or another
+        # escaped character appears before it.
+        display_match = flex_match(raw_token, completed_token, candidate_lower=completed_token.lower())
+        completed_positions = [start + pos for pos in display_match.positions] if display_match is not None else []
 
         runtime_matches.append(
             MatchResult(
@@ -1991,6 +1991,7 @@ def render_result_line(
 
     result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", 1)
     runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", 2)
+    underline_matches = False
     gutter_width = RESULT_PREFIX_WIDTH
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
     body_width = max(0, width - gutter_width - suffix_width)
@@ -2002,19 +2003,19 @@ def render_result_line(
     if item.runtime_completion:
         if selected:
             normal_style = RESET + style(fg=runtime_color, bold=True)
-            match_style = RESET + style(fg=runtime_color, bold=True, underline=True)
+            match_style = RESET + style(fg=runtime_color, bold=True, underline=underline_matches)
         else:
             normal_style = RESET + style(fg=runtime_color)
-            match_style = style(fg=runtime_color, underline=True)
+            match_style = style(fg=runtime_color, underline=underline_matches)
     else:
         if selected:
             normal_style = RESET + style(fg=result_color, bold=True)
         else:
             normal_style = RESET
         if selected:
-            match_style = RESET + style(fg=result_color, bold=True, underline=True)
+            match_style = RESET + style(fg=result_color, bold=True, underline=underline_matches)
         else:
-            match_style = style(fg=result_color, underline=True)
+            match_style = style(fg=result_color, underline=underline_matches)
 
     if item.runtime_completion:
         selector_style = style(fg=runtime_color, bold=True)

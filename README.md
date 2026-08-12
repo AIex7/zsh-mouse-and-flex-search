@@ -79,6 +79,8 @@ eval "$(zsh-flex-history-init-zsh --hook)"
   - Sets the ANSI color used for runtime completions.
   - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`.
   - Defaults to `green`.
+- `ZSH_FLEX_HISTORY_NO_UNDERLINE`
+  - Match underlines are disabled by default. This setting remains accepted for compatibility.
 - Runtime path completion
   - Expands `$HOME` / `${HOME}`, `$PWD` / `${PWD}`, `$OLDPWD`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, `$XDG_CACHE_HOME`, `$XDG_STATE_HOME`, and `$TMPDIR` for filesystem lookup.
   - Keeps the variable expression in the completed command, such as `$HOME/Documents/`.
