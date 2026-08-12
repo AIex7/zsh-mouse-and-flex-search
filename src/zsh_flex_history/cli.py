@@ -971,6 +971,7 @@ def top_ranked_directory_entries(
         ranked_candidates.append(matched)
 
     ranked_results = apply_prefix_priority(query, ranked_candidates)
+    ranked_results.sort(key=lambda item: item.score, reverse=True)
     ordered_entries: list[DirectoryListingEntry] = []
     for item in ranked_results:
         entry = entry_by_name.get(item.text)
