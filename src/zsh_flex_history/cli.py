@@ -195,7 +195,7 @@ def bg_code(slot: int) -> str:
     return "49"
 
 
-def ansi_color_from_env(name: str, default: int) -> int:
+def ansi_color_from_env(name: str, default: Optional[int]) -> Optional[int]:
     raw = os.environ.get(name, "").strip().lower().replace("_", "-")
     if not raw:
         return default
@@ -234,11 +234,17 @@ def style(
     fg_rgb: Optional[str] = None,
     bg_rgb: Optional[str] = None,
     bold: bool = False,
+    dim: bool = False,
+    italic: bool = False,
     underline: bool = False,
 ) -> str:
     codes: list[str] = []
     if bold:
         codes.append("1")
+    if dim:
+        codes.append("2")
+    if italic:
+        codes.append("3")
     if underline:
         codes.append("4")
     if fg is not None:
@@ -1989,8 +1995,8 @@ def render_result_line(
     if width <= 0:
         return ""
 
-    result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", 1)
-    runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", 2)
+    result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None)
+    runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None)
     underline_matches = False
     gutter_width = RESULT_PREFIX_WIDTH
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
@@ -2002,11 +2008,11 @@ def render_result_line(
 
     if item.runtime_completion:
         if selected:
-            normal_style = RESET + style(fg=runtime_color, bold=True)
-            match_style = RESET + style(fg=runtime_color, bold=True, underline=underline_matches)
+            normal_style = RESET + style(fg=runtime_color, bold=True, italic=True)
+            match_style = RESET + style(fg=runtime_color, bold=True, italic=True, underline=underline_matches)
         else:
-            normal_style = RESET + style(fg=runtime_color)
-            match_style = style(fg=runtime_color, underline=underline_matches)
+            normal_style = RESET + style(fg=runtime_color, italic=True)
+            match_style = style(fg=runtime_color, italic=True, underline=underline_matches)
     else:
         if selected:
             normal_style = RESET + style(fg=result_color, bold=True)
@@ -2018,7 +2024,7 @@ def render_result_line(
             match_style = style(fg=result_color, underline=underline_matches)
 
     if item.runtime_completion:
-        selector_style = style(fg=runtime_color, bold=True)
+        selector_style = style(fg=runtime_color, bold=True, italic=True)
     else:
         selector_style = style(fg=result_color, bold=True)
     selector_source = FAILED_SELECTOR_GLYPH if item.failed else selector_glyph

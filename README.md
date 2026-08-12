@@ -74,11 +74,11 @@ eval "$(zsh-flex-history-init-zsh --hook)"
 - `ZSH_FLEX_HISTORY_COLOR`
   - Sets the ANSI color used for normal history results.
   - Accepts `0`-`15` or names like `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, and `bright-blue`.
-  - Defaults to `red`.
+  - Defaults to the terminal's foreground color.
 - `ZSH_FLEX_HISTORY_RUNTIME_COLOR`
   - Sets the ANSI color used for runtime completions.
   - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`.
-  - Defaults to `green`.
+  - Defaults to the terminal's foreground color.
 - `ZSH_FLEX_HISTORY_NO_UNDERLINE`
   - Match underlines are disabled by default. This setting remains accepted for compatibility.
 - Runtime path completion
