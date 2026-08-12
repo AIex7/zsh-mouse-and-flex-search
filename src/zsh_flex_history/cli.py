@@ -151,7 +151,9 @@ def cached_directory_listing(directory: Path) -> Optional[tuple[DirectoryListing
         with os.scandir(cache_key) as scanned_entries:
             for entry in scanned_entries:
                 try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
+                    # Follow symlinks so paths such as macOS's /etc symlink
+                    # are still completed as directories with a trailing '/'.
+                    is_dir = entry.is_dir()
                 except OSError:
                     continue
                 entries.append(DirectoryListingEntry(entry.name, Path(entry.path), is_dir))
