@@ -1027,7 +1027,13 @@ def runtime_completion_matches(
     # Ignore it for matching so path completions do not briefly disappear.
     incomplete_escape = stripped.endswith("\\")
     token_prefix = shell_unescape_fragment(stripped[:-1] if incomplete_escape else stripped)
-    environment_path = expand_path_completion_environment(token_prefix) if quote != "'" else None
+    # An escaped dollar is a literal filename character, not an environment
+    # variable reference. Check the raw fragment before unescaping it.
+    environment_path = (
+        expand_path_completion_environment(token_prefix)
+        if quote != "'" and not stripped.startswith("\\$")
+        else None
+    )
     lookup_prefix = environment_path[0] if environment_path is not None else token_prefix
     chosen_entries: list[DirectoryListingEntry] = []
     completed_prefix = ""
