@@ -973,6 +973,36 @@ def top_ranked_directory_entries(
     return ordered_entries
 
 
+PATH_COMPLETION_ENV_VARS = frozenset(
+    {
+        "HOME",
+        "PWD",
+        "OLDPWD",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_STATE_HOME",
+        "TMPDIR",
+    }
+)
+
+
+def expand_path_completion_environment(token: str) -> Optional[tuple[str, str, str]]:
+    """Expand one approved environment variable without evaluating shell text."""
+    match = re.fullmatch(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(.*)", token)
+    if match is None:
+        return None
+    name = match.group(1) or match.group(2)
+    suffix = match.group(3)
+    if name not in PATH_COMPLETION_ENV_VARS or (suffix and not suffix.startswith("/")):
+        return None
+    value = os.environ.get(name)
+    if not value:
+        return None
+    variable_text = token[: len(token) - len(suffix)] if suffix else token
+    return value + suffix, variable_text, suffix
+
+
 def runtime_completion_matches(
     query: str,
     cursor_pos: int,
@@ -993,25 +1023,38 @@ def runtime_completion_matches(
     if not stripped:
         return []
 
-    token_prefix = shell_unescape_fragment(stripped)
+    # A trailing backslash is an incomplete escape while the user is typing.
+    # Ignore it for matching so path completions do not briefly disappear.
+    incomplete_escape = stripped.endswith("\\")
+    token_prefix = shell_unescape_fragment(stripped[:-1] if incomplete_escape else stripped)
+    environment_path = expand_path_completion_environment(token_prefix) if quote != "'" else None
+    lookup_prefix = environment_path[0] if environment_path is not None else token_prefix
     chosen_entries: list[DirectoryListingEntry] = []
     completed_prefix = ""
 
-    if "/" in token_prefix:
-        if token_prefix.endswith("/"):
-            parent_part = token_prefix[:-1]
+    if "/" in lookup_prefix:
+        if lookup_prefix.endswith("/"):
+            parent_part = lookup_prefix[:-1]
             name_prefix = ""
         else:
-            parent_part, sep, name_prefix = token_prefix.rpartition("/")
+            parent_part, sep, name_prefix = lookup_prefix.rpartition("/")
             if not sep:
                 parent_part = ""
 
         base_dir: Optional[Path] = None
         display_prefix = parent_part
-        if token_prefix.startswith("/"):
+        if environment_path is not None:
+            _expanded_value, variable_text, suffix = environment_path
+            if suffix.endswith("/"):
+                display_prefix = variable_text + suffix[:-1]
+            else:
+                suffix_parent, _separator, _suffix_name = suffix.rpartition("/")
+                display_prefix = variable_text + suffix_parent
+            base_dir = Path(parent_part) if parent_part else Path("/")
+        elif lookup_prefix.startswith("/"):
             base_dir = Path(parent_part) if parent_part else Path("/")
             display_prefix = parent_part if parent_part else "/"
-        elif token_prefix.startswith("~"):
+        elif lookup_prefix.startswith("~"):
             expanded = Path(parent_part if parent_part else "~").expanduser()
             base_dir = expanded
             display_prefix = parent_part if parent_part else "~"
@@ -1060,7 +1103,14 @@ def runtime_completion_matches(
     runtime_matches: list[MatchResult] = []
     for chosen in chosen_entries:
         completed_value = completed_prefix + chosen.name + ("/" if chosen.is_dir else "")
-        if quote is not None:
+        if environment_path is not None:
+            _expanded_value, variable_text, _suffix = environment_path
+            suffix = completed_value[len(variable_text) :]
+            if quote is not None:
+                completed_token = quote + variable_text + shell_escape_quoted_fragment(suffix, quote) + quote
+            else:
+                completed_token = variable_text + shell_escape_fragment(suffix)
+        elif quote is not None:
             completed_token = quote + shell_escape_quoted_fragment(completed_value, quote)
             completed_token += quote
         else:
@@ -3055,10 +3105,13 @@ def run(
                             preferred_runtime_row = 0 if selected_result.runtime_completion else None
                             token_start, token_end = token_bounds(query, cursor_pos)
                             quote, _closes_quote = enclosing_quote(query[token_start:token_end])
+                            trailing_text_length = len(query) - token_end
                             query = selected_result.text
                             cursor_pos = len(query)
-                            if selected_result.runtime_completion and quote is not None:
-                                cursor_pos = max(0, len(query) - 1)
+                            if selected_result.runtime_completion:
+                                cursor_pos = max(0, len(query) - trailing_text_length)
+                                if quote is not None:
+                                    cursor_pos = max(token_start, cursor_pos - 1)
                             clear_selection()
                             sync_mouse_mode()
                             if preferred_runtime_row is None:
