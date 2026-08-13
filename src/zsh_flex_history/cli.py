@@ -2513,6 +2513,7 @@ def run(
     min_result_rows = 3
     min_panel_rows = 1 + min_result_rows
     resize_pending = False
+    resize_cleanup_pending = False
     resize_debounce_seconds = int_from_env("ZSH_FLEX_HISTORY_RESIZE_DEBOUNCE_MS", 100, minimum=0) / 1000.0
     resize_deadline: Optional[float] = None
     resize_read_fd: Optional[int] = None
@@ -2970,17 +2971,14 @@ def run(
                         if now >= resize_deadline:
                             resize_pending = False
                             resize_deadline = None
-                            refresh_anchor_from_cursor(
-                                trust_current_position=True,
-                                trust_row_only=True,
-                                clear_old_panel=False,
+                            resize_cleanup_pending = True
+                            ev, payload = read_key(fd, timeout=None, wake_fd=resize_read_fd)
+                        else:
+                            ev, payload = read_key(
+                                fd,
+                                timeout=max(0.0, resize_deadline - now),
+                                wake_fd=resize_read_fd,
                             )
-                            continue
-                        ev, payload = read_key(
-                            fd,
-                            timeout=max(0.0, resize_deadline - now),
-                            wake_fd=resize_read_fd,
-                        )
                         if ev in ("timeout", "resize"):
                             continue
                         pending_event = (ev, payload)
@@ -2988,6 +2986,10 @@ def run(
                     term_size = tty_terminal_size(fd)
                     width = term_size.columns
                     term_lines = term_size.lines
+                    if resize_cleanup_pending:
+                        for row in range(anchor_row, term_lines + 1):
+                            term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
+                        resize_cleanup_pending = False
                     render_width = terminal_safe_render_width(width, anchor_col)
                     query_width = query_text_render_width(render_width)
                     required_query_rows = max(1, len(build_query_visual_rows(query, query_width)))
