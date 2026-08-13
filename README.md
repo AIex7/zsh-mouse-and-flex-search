@@ -79,6 +79,10 @@ eval "$(zsh-flex-history-init-zsh --hook)"
   - Sets the ANSI color used for runtime completions.
   - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`.
   - Defaults to the terminal's foreground color.
+- `ZSH_FLEX_HISTORY_CURSOR_COLOR`
+  - Sets the ANSI background color of the visual cursor.
+  - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`, plus `#RRGGBB` values such as `#ff0000`.
+  - Defaults to the Doric cursor color.
 - `ZSH_FLEX_HISTORY_NO_UNDERLINE`
   - Match underlines are disabled by default. This setting remains accepted for compatibility.
 - Runtime path completion

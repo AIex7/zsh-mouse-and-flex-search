@@ -208,6 +208,13 @@ def ansi_color_from_env(name: str, default: Optional[int]) -> Optional[int]:
     return ANSI_COLOR_NAMES.get(raw, default)
 
 
+def color_value_from_env(name: str) -> tuple[Optional[int], Optional[str]]:
+    raw = os.environ.get(name, "").strip().lower()
+    if raw.startswith("#") and re.fullmatch(r"#[0-9a-f]{6}", raw):
+        return None, raw
+    return ansi_color_from_env(name, None), None
+
+
 def int_from_env(name: str, default: int, *, minimum: int = 0) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -265,7 +272,14 @@ def style(
 
 RESET = "\x1b[0m"
 QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
-VISUAL_CURSOR_BG = style(fg_rgb=DORIC["fg_main"], bg_rgb=DORIC["bg_accent"])
+_cursor_color, _cursor_color_rgb = color_value_from_env("ZSH_FLEX_HISTORY_CURSOR_COLOR")
+VISUAL_CURSOR_BG = (
+    style(fg_rgb=DORIC["fg_main"], bg=_cursor_color)
+    if _cursor_color is not None
+    else style(fg_rgb=DORIC["fg_main"], bg_rgb=_cursor_color_rgb)
+    if _cursor_color_rgb is not None
+    else style(fg_rgb=DORIC["fg_main"], bg_rgb=DORIC["bg_accent"])
+)
 CLEAR_TO_END = "\x1b[K"
 HIDE_CURSOR = "\x1b[?25l"
 SHOW_CURSOR = "\x1b[?25h"
@@ -2108,7 +2122,7 @@ def draw_panel(
                 if active_query_style:
                     query_parts.append(RESET)
                     active_query_style = ""
-                query_parts.append(f"{VISUAL_CURSOR_BG}{token_style}{ch}{RESET}")
+                query_parts.append(f"{token_style}{VISUAL_CURSOR_BG}{ch}{RESET}")
                 continue
             if sel and sel[0] <= qidx < sel[1]:
                 if active_query_style:
@@ -2730,7 +2744,7 @@ def run(
                 if pos is None:
                     next_start_row = max(1, term_lines - 1)
                     next_start_col = 1
-                elif len(query) < 10:
+                elif len(query) < 18:
                     next_start_row = pos[0]
                     next_start_col = initial_cursor_col if trust_row_only else pos[1]
                     initial_cursor_row = next_start_row
