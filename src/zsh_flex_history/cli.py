@@ -2581,6 +2581,8 @@ def run(
 
             query = ""
             last_refresh_query: Optional[str] = None
+            last_refresh_results: list[str] = []
+            last_refresh_query_rows = 1
             cursor_pos = 0
             skip_history_record = False
             sel_anchor: Optional[int] = None
@@ -2737,7 +2739,7 @@ def run(
                 trust_row_only: bool = True,
             ) -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
-                nonlocal initial_cursor_row, initial_cursor_col, last_refresh_query
+                nonlocal initial_cursor_row, initial_cursor_col, last_refresh_query, last_refresh_results, last_refresh_query_rows
 
                 term_size = tty_terminal_size(fd)
                 term_lines = term_size.lines
@@ -2791,15 +2793,16 @@ def run(
                 panel_rows = next_panel_rows
                 last_drawn_panel_rows = panel_rows
 
+                render_width = terminal_safe_render_width(term_size.columns, next_anchor_col)
+                query_width = query_text_render_width(render_width)
+                query_start, _, query_rows_used, _ = wrapped_query_layout(
+                    query,
+                    cursor_pos,
+                    query_width,
+                    next_panel_rows,
+                )
+                current_results = [item.text for item in results[:3]]
                 if last_refresh_query != query:
-                    render_width = terminal_safe_render_width(term_size.columns, next_anchor_col)
-                    query_width = query_text_render_width(render_width)
-                    query_start, _, _, _ = wrapped_query_layout(
-                        query,
-                        cursor_pos,
-                        query_width,
-                        next_panel_rows,
-                    )
                     query_rows = build_query_visual_rows(query, query_width)
                     common_length = 0
                     if last_refresh_query is not None:
@@ -2814,7 +2817,10 @@ def run(
                     clear_col = (
                         next_anchor_col if clear_row == 0 else max(1, next_anchor_col - 1)
                     ) + clear_col + 1
-                    for row in range(next_anchor_row + clear_row, term_lines + 1):
+                    for row in range(
+                        next_anchor_row + clear_row,
+                        next_anchor_row + max(last_refresh_query_rows, query_rows_used),
+                    ):
                         term_write(
                             move_to(
                                 row,
@@ -2823,7 +2829,56 @@ def run(
                             + CLEAR_TO_END
                         )
                     last_refresh_query = query
+                    last_refresh_query_rows = query_rows_used
+                query_rows = build_query_visual_rows(query, query_width)
+                last_row_abs, last_col = query_cursor_visual_position(query_rows, len(query))
+                last_row = max(0, last_row_abs - query_start)
+                last_row_col = (
+                    next_anchor_col if last_row == 0 else max(1, next_anchor_col - 1)
+                ) + last_col + 1
+                term_write(move_to(next_anchor_row + last_row, last_row_col) + CLEAR_TO_END)
+                for result_index in range(max(len(last_refresh_results), len(current_results))):
+                    previous_result = (
+                        last_refresh_results[result_index]
+                        if result_index < len(last_refresh_results)
+                        else ""
+                    )
+                    current_result = (
+                        current_results[result_index] if result_index < len(current_results) else ""
+                    )
+                    common_length = 0
+                    common_limit = min(len(previous_result), len(current_result))
+                    while (
+                        common_length < common_limit
+                        and previous_result[common_length] == current_result[common_length]
+                    ):
+                        common_length += 1
+                    if previous_result != current_result:
+                        result_row = next_anchor_row + query_rows_used + result_index
+                        clear_result_col = 1 if not current_result else 3 + common_length
+                        term_write(move_to(result_row, clear_result_col) + CLEAR_TO_END)
+                last_refresh_results = current_results
+                clear_after_results_row = next_anchor_row + query_rows_used + 3
+                for row in range(clear_after_results_row, term_lines + 1):
+                    term_write(move_to(row, 1) + CLEAR_TO_END)
                 term_write(move_to(anchor_row, anchor_col))
+                term_flush()
+
+            def clear_after_query_suffix() -> None:
+                term_size = tty_terminal_size(fd)
+                render_width = terminal_safe_render_width(term_size.columns, anchor_col)
+                query_width = query_text_render_width(render_width)
+                query_start, _, _, _ = wrapped_query_layout(
+                    query,
+                    cursor_pos,
+                    query_width,
+                    panel_rows,
+                )
+                query_rows = build_query_visual_rows(query, query_width)
+                row_abs, col = query_cursor_visual_position(query_rows, len(query))
+                row = max(0, row_abs - query_start)
+                draw_col = anchor_col if row == 0 else max(1, anchor_col - 1)
+                term_write(move_to(anchor_row + row, draw_col + col + 2) + CLEAR_TO_END)
                 term_flush()
 
             def clear_panel_and_restore_cursor() -> None:
@@ -3103,6 +3158,7 @@ def run(
                             if preferred_runtime_row is None:
                                 selected = 0
                             offset = 0
+                            clear_after_query_suffix()
                         continue
                     if ev == "left":
                         move_cursor(cursor_pos - 1)
