@@ -2181,6 +2181,12 @@ def draw_panel(
         )
         result_lines.append(base_line)
 
+    final_query_row_abs, final_query_col = query_cursor_visual_position(query_rows, len(query))
+    final_query_row = final_query_row_abs - query_start
+    final_query_draw_col = draw_col_for_row(final_query_row)
+    clear_after_query_col = final_query_draw_col + final_query_col + 1
+    term_write(move_to(anchor_row + final_query_row, clear_after_query_col) + CLEAR_TO_END)
+
     for i, line in enumerate(query_lines[:query_rows_used]):
         draw_col = draw_col_for_row(i)
         term_write(move_to(anchor_row + i, draw_col) + line)
