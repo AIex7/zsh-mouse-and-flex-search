@@ -2726,8 +2726,7 @@ def run(
 
             def refresh_anchor_from_cursor(
                 *,
-                trust_current_position: bool = False,
-                trust_row_only: bool = False,
+                trust_row_only: bool = True,
                 clear_old_panel: bool = True,
             ) -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
@@ -2743,7 +2742,7 @@ def run(
                 if pos is None:
                     next_start_row = max(1, term_lines - 1)
                     next_start_col = 1
-                elif trust_current_position or pos[0] == 1:
+                elif len(query) < 10:
                     next_start_row = pos[0]
                     next_start_col = initial_cursor_col if trust_row_only else pos[1]
                     initial_cursor_row = next_start_row
@@ -3053,6 +3052,8 @@ def run(
                         ev, payload = pending_event
                     if ev == "timeout":
                         continue
+
+                    refresh_anchor_from_cursor()
     
                     if ev == "interrupt":
                         clear_panel_and_restore_cursor()
@@ -3064,8 +3065,6 @@ def run(
                         chosen = query
                         break
                     if ev == "tab":
-                        if not query:
-                            refresh_anchor_from_cursor()
                         if 0 <= selected < len(results):
                             selected_result = results[selected]
                             preferred_runtime_row = 0 if selected_result.runtime_completion else None
@@ -3118,13 +3117,9 @@ def run(
                         select_all_query()
                         continue
                     if ev == "up":
-                        if not query:
-                            refresh_anchor_from_cursor()
                         selected = max(0, selected - 1)
                         continue
                     if ev == "down":
-                        if not query:
-                            refresh_anchor_from_cursor()
                         selected = min(max(0, len(results) - 1), selected + 1)
                         continue
                     if ev == "pgup":
@@ -3134,8 +3129,6 @@ def run(
                         selected = min(max(0, len(results) - 1), selected + visible)
                         continue
                     if ev == "backspace":
-                        if not query:
-                            refresh_anchor_from_cursor()
                         sel = selection_bounds(sel_anchor, sel_end)
                         if sel:
                             query = query[: sel[0]] + query[sel[1] :]
@@ -3206,8 +3199,6 @@ def run(
                             chosen = empty_space_command
                             skip_history_record = True
                             break
-                        if not query:
-                            refresh_anchor_from_cursor()
                         sel = selection_bounds(sel_anchor, sel_end)
                         if sel:
                             query = query[: sel[0]] + ch + query[sel[1] :]
@@ -3231,8 +3222,6 @@ def run(
                         pasted = normalize_pasted_text(read_clipboard())
                         if not pasted:
                             continue
-                        if not query:
-                            refresh_anchor_from_cursor()
                         sel = selection_bounds(sel_anchor, sel_end)
                         if sel:
                             query = query[: sel[0]] + pasted + query[sel[1] :]
@@ -3249,8 +3238,6 @@ def run(
                         pasted = normalize_pasted_text(str(payload))
                         if not pasted:
                             continue
-                        if not query:
-                            refresh_anchor_from_cursor()
                         sel = selection_bounds(sel_anchor, sel_end)
                         if sel:
                             query = query[: sel[0]] + pasted + query[sel[1] :]
