@@ -2192,7 +2192,12 @@ def draw_panel(
         term_write(move_to(anchor_row + i, draw_col) + line)
     remaining_rows = max(0, panel_rows - query_rows_used)
     for i, line in enumerate(result_lines[:remaining_rows]):
-        term_write(move_to(anchor_row + query_rows_used + i, result_anchor_col) + line)
+        result_row = anchor_row + query_rows_used + i
+        term_write(move_to(result_row, result_anchor_col) + line)
+        plain_line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        clear_col = result_anchor_col + text_display_width(plain_line)
+        if clear_col <= width:
+            term_write(move_to(result_row, clear_col) + CLEAR_TO_END)
 
     # Keep the hidden terminal cursor synchronized for the next position query.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
