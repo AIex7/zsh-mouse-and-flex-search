@@ -265,7 +265,6 @@ def style(
 
 RESET = "\x1b[0m"
 QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
-CLEAR_LINE = "\x1b[2K"
 CLEAR_TO_END = "\x1b[K"
 SHOW_CURSOR = "\x1b[?25h"
 ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
@@ -291,13 +290,6 @@ def term_write(text: str) -> None:
 
 def term_flush() -> None:
     TERM_OUT.flush()
-
-
-def clear_rows(top: int, bottom: int) -> None:
-    if bottom < top:
-        return
-    for row in range(max(1, top), max(1, bottom) + 1):
-        term_write(move_to(row, 1) + CLEAR_LINE)
 
 
 def tty_terminal_size(fd: int, fallback: tuple[int, int] = (120, 24)) -> os.terminal_size:
@@ -2167,17 +2159,10 @@ def draw_panel(
 
     for i, line in enumerate(query_lines[:query_rows_used]):
         draw_col = draw_col_for_row(i)
-        term_write(move_to(anchor_row + i, draw_col) + CLEAR_TO_END + line)
+        term_write(move_to(anchor_row + i, draw_col) + line)
     remaining_rows = max(0, panel_rows - query_rows_used)
     for i, line in enumerate(result_lines[:remaining_rows]):
-        term_write(move_to(anchor_row + query_rows_used + i, result_anchor_col) + CLEAR_TO_END + line)
-
-    try:
-        terminal_lines = tty_terminal_size(TERM_OUT.fileno()).lines
-    except (AttributeError, OSError, ValueError):
-        terminal_lines = anchor_row + panel_rows - 1
-    for row in range(anchor_row + query_rows_used + results_visible, terminal_lines + 1):
-        term_write(move_to(row, 1) + CLEAR_TO_END)
+        term_write(move_to(anchor_row + query_rows_used + i, result_anchor_col) + line)
 
     # Put cursor on query input field.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
@@ -2567,8 +2552,6 @@ def run(
                 if inline_with_prompt and row == current_anchor_row:
                     return current_anchor_col
                 return max(1, current_anchor_col - 1)
-            for row in range(anchor_row, anchor_row + panel_rows):
-                term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
             term_write(move_to(anchor_row, anchor_col))
             term_flush()
 
@@ -2727,14 +2710,9 @@ def run(
             def refresh_anchor_from_cursor(
                 *,
                 trust_row_only: bool = True,
-                clear_old_panel: bool = True,
             ) -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
                 nonlocal initial_cursor_row, initial_cursor_col
-                old_anchor_row = anchor_row
-                old_anchor_col = anchor_col
-                old_panel_rows = max(panel_rows, last_drawn_panel_rows)
-                clear_panel_area = True
 
                 term_size = tty_terminal_size(fd)
                 term_lines = term_size.lines
@@ -2750,7 +2728,6 @@ def run(
                 else:
                     next_start_row = initial_cursor_row
                     next_start_col = initial_cursor_col
-                    clear_panel_area = False
                     term_write(move_to(initial_cursor_row, initial_cursor_col))
                     term_flush()
 
@@ -2780,10 +2757,6 @@ def run(
                     next_anchor_col = 1
                     next_panel_rows = max(1, term_lines - next_anchor_row + 1)
 
-                if clear_panel_area and clear_old_panel:
-                    for row in range(old_anchor_row, old_anchor_row + old_panel_rows):
-                        term_write(move_to(row, panel_clear_col(row, old_anchor_row, old_anchor_col)) + CLEAR_TO_END)
-
                 start_row = next_start_row
                 start_col = next_start_col
                 initial_cursor_row = start_row
@@ -2793,9 +2766,8 @@ def run(
                 panel_rows = next_panel_rows
                 last_drawn_panel_rows = panel_rows
 
-                if clear_panel_area:
-                    for row in range(anchor_row, anchor_row + panel_rows):
-                        term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
+                for row in range(anchor_row, anchor_row + panel_rows):
+                    term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
                 term_write(move_to(anchor_row, anchor_col))
                 term_flush()
 
@@ -2808,9 +2780,6 @@ def run(
                     term_write(DISABLE_MOUSE)
                     mouse_enabled = False
                     mouse_selecting = False
-                # Clear panel content so repeated invocations always start clean.
-                for row in range(anchor_row, anchor_row + max(panel_rows, last_drawn_panel_rows)):
-                    term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
                 # Restore cursor to the exact prompt position captured at invocation start.
                 term_write(move_to(start_row, start_col))
                 term_flush()
@@ -3015,9 +2984,6 @@ def run(
                         status_message = "loading history..."
                     elif history_load_error and not results:
                         status_message = "history load failed"
-                    if panel_rows < last_drawn_panel_rows:
-                        for row in range(anchor_row + panel_rows, anchor_row + last_drawn_panel_rows):
-                            term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
                     if selected >= len(results):
                         selected = max(0, len(results) - 1)
                     if selected < offset:
