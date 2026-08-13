@@ -265,7 +265,9 @@ def style(
 
 RESET = "\x1b[0m"
 QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
+VISUAL_CURSOR_BG = style(fg_rgb=DORIC["fg_main"], bg_rgb=DORIC["bg_accent"])
 CLEAR_TO_END = "\x1b[K"
+HIDE_CURSOR = "\x1b[?25l"
 SHOW_CURSOR = "\x1b[?25h"
 ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
@@ -358,7 +360,7 @@ class RawTerminal:
         # Start with mouse reporting disabled; it will be enabled lazily
         # once the user types the first character in the query.
         term_write(DISABLE_MOUSE)
-        term_write(SHOW_CURSOR)
+        term_write(HIDE_CURSOR)
         term_flush()
         return self
 
@@ -2102,6 +2104,12 @@ def draw_panel(
             qidx = vrow.start + i
             token = syntax_tokens[qidx] if qidx < len(syntax_tokens) else "default"
             token_style = ansi_for_token(token)
+            if row_cursor_index == i:
+                if active_query_style:
+                    query_parts.append(RESET)
+                    active_query_style = ""
+                query_parts.append(f"{VISUAL_CURSOR_BG}{token_style}{ch}{RESET}")
+                continue
             if sel and sel[0] <= qidx < sel[1]:
                 if active_query_style:
                     query_parts.append(RESET)
@@ -2117,6 +2125,8 @@ def draw_panel(
             query_parts.append(ch)
         if active_query_style:
             query_parts.append(RESET)
+        if row_cursor_index == len(vrow.text):
+            query_parts.append(f"{VISUAL_CURSOR_BG} {RESET}")
         query_line = " " + "".join(query_parts)
         if row == 0 and debug_note:
             room = max(0, render_width - (seg_len + query_lead_cols))
@@ -2164,7 +2174,7 @@ def draw_panel(
     for i, line in enumerate(result_lines[:remaining_rows]):
         term_write(move_to(anchor_row + query_rows_used + i, result_anchor_col) + line)
 
-    # Put cursor on query input field.
+    # Keep the hidden terminal cursor synchronized for the next position query.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
     cursor_row = min(query_rows_used - 1, max(0, cursor_row_abs - query_start))
     cursor_col = max(0, min(cursor_col + query_lead_cols, render_width - 1))
