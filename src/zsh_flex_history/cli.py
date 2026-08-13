@@ -2580,6 +2580,7 @@ def run(
             term_flush()
 
             query = ""
+            last_refresh_query: Optional[str] = None
             cursor_pos = 0
             skip_history_record = False
             sel_anchor: Optional[int] = None
@@ -2736,7 +2737,7 @@ def run(
                 trust_row_only: bool = True,
             ) -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
-                nonlocal initial_cursor_row, initial_cursor_col
+                nonlocal initial_cursor_row, initial_cursor_col, last_refresh_query
 
                 term_size = tty_terminal_size(fd)
                 term_lines = term_size.lines
@@ -2790,8 +2791,38 @@ def run(
                 panel_rows = next_panel_rows
                 last_drawn_panel_rows = panel_rows
 
-                for row in range(anchor_row, anchor_row + panel_rows):
-                    term_write(move_to(row, panel_clear_col(row, anchor_row, anchor_col)) + CLEAR_TO_END)
+                if last_refresh_query != query:
+                    render_width = terminal_safe_render_width(term_size.columns, next_anchor_col)
+                    query_width = query_text_render_width(render_width)
+                    query_start, _, _, _ = wrapped_query_layout(
+                        query,
+                        cursor_pos,
+                        query_width,
+                        next_panel_rows,
+                    )
+                    query_rows = build_query_visual_rows(query, query_width)
+                    common_length = 0
+                    if last_refresh_query is not None:
+                        common_limit = min(len(last_refresh_query), len(query))
+                        while (
+                            common_length < common_limit
+                            and last_refresh_query[common_length] == query[common_length]
+                        ):
+                            common_length += 1
+                    clear_row, clear_col = query_cursor_visual_position(query_rows, common_length)
+                    clear_row = max(0, clear_row - query_start)
+                    clear_col = (
+                        next_anchor_col if clear_row == 0 else max(1, next_anchor_col - 1)
+                    ) + clear_col + 1
+                    for row in range(next_anchor_row + clear_row, term_lines + 1):
+                        term_write(
+                            move_to(
+                                row,
+                                clear_col if row == next_anchor_row + clear_row else 1,
+                            )
+                            + CLEAR_TO_END
+                        )
+                    last_refresh_query = query
                 term_write(move_to(anchor_row, anchor_col))
                 term_flush()
 
