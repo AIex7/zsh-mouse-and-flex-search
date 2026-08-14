@@ -2096,6 +2096,9 @@ def draw_panel(
     query_lines: list[str] = []
     result_lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
+    previous_visual_cursor = getattr(draw_panel, "_previous_visual_cursor", None)
+    if previous_visual_cursor is not None:
+        term_write(move_to(*previous_visual_cursor) + RESET + " " + RESET)
     query_start, query_view_len, query_rows_used, results_visible = wrapped_query_layout(
         query,
         cursor_pos,
@@ -2211,8 +2214,13 @@ def draw_panel(
     # Keep the hidden terminal cursor synchronized for the next position query.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
     cursor_row = min(query_rows_used - 1, max(0, cursor_row_abs - query_start))
+    visual_cursor_col = cursor_col + query_lead_cols
     cursor_col = max(0, min(cursor_col + query_lead_cols, render_width - 1))
     term_write(move_to(anchor_row + cursor_row, draw_col_for_row(cursor_row) + cursor_col))
+    draw_panel._previous_visual_cursor = (
+        anchor_row + cursor_row,
+        draw_col_for_row(cursor_row) + visual_cursor_col,
+    )
     term_flush()
     return query_start, query_view_len, query_rows_used, results_visible
 
@@ -2944,6 +2952,7 @@ def run(
                     mouse_selecting = False
                 if clear_display:
                     clear_panel_display()
+                draw_panel._previous_visual_cursor = None
                 # Restore cursor to the exact prompt position captured at invocation start.
                 term_write(move_to(start_row, start_col))
                 term_flush()
