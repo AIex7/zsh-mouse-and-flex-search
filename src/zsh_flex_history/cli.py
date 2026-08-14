@@ -2075,6 +2075,7 @@ def draw_panel(
     offset: int,
     panel_rows: int,
     width: int,
+    clear_previous_cursor: bool = True,
     status_message: str = "",
     debug_note: str = "",
     total_count: Optional[int] = None,
@@ -2098,7 +2099,7 @@ def draw_panel(
     result_lines: list[str] = []
     cursor_pos = max(0, min(cursor_pos, len(query)))
     previous_visual_cursor = getattr(draw_panel, "_previous_visual_cursor", None)
-    if previous_visual_cursor is not None:
+    if clear_previous_cursor and previous_visual_cursor is not None:
         term_write(move_to(*previous_visual_cursor) + RESET + " " + RESET)
     query_start, query_view_len, query_rows_used, results_visible = wrapped_query_layout(
         query,
@@ -3024,6 +3025,7 @@ def run(
                 match_cache[key] = (indices, cached_results, matched_count, total_count)
 
             try:
+                skip_previous_cursor_clear = False
                 while True:
                     # Each completed keypress leaves the physical cursor at
                     # the prompt start. Restore that invariant before doing
@@ -3185,11 +3187,13 @@ def run(
                         offset,
                         panel_rows,
                         width,
+                        clear_previous_cursor=not skip_previous_cursor_clear,
                         status_message=status_message,
                         debug_note=debug_note,
                         total_count=total_count,
                         syntax_tokens=syntax_tokens,
                     )
+                    skip_previous_cursor_clear = False
                     last_drawn_panel_rows = panel_rows
                     # Keep the physical cursor at the stable prompt position
                     # while waiting for the next keypress.
@@ -3359,6 +3363,7 @@ def run(
                             cursor_pos = sel[0] + 1
                             clear_selection()
                         else:
+                            skip_previous_cursor_clear = True
                             query = query[:cursor_pos] + ch + query[cursor_pos:]
                             cursor_pos += 1
                         sync_mouse_mode()
