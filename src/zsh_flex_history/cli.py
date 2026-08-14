@@ -2199,6 +2199,15 @@ def draw_panel(
         if clear_col <= width:
             term_write(move_to(result_row, clear_col) + CLEAR_TO_END)
 
+    # Remove anything left below the current panel from previous draws.
+    try:
+        term_lines = tty_terminal_size(TERM_OUT.fileno()).lines
+    except (AttributeError, OSError):
+        term_lines = shutil.get_terminal_size((width, 24)).lines
+    last_result_row = anchor_row + query_rows_used + len(result_lines[:remaining_rows]) - 1
+    for row in range(last_result_row + 1, term_lines + 1):
+        term_write(move_to(row, 1) + CLEAR_TO_END)
+
     # Keep the hidden terminal cursor synchronized for the next position query.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
     cursor_row = min(query_rows_used - 1, max(0, cursor_row_abs - query_start))
@@ -2745,29 +2754,14 @@ def run(
             search_thread = threading.Thread(target=search_worker, daemon=True)
             search_thread.start()
 
-            def refresh_anchor_from_cursor(
-                *,
-                trust_row_only: bool = True,
-            ) -> None:
+            def reanchor_from_position(pos: tuple[int, int]) -> None:
                 nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
                 nonlocal initial_cursor_row, initial_cursor_col, last_refresh_query, last_refresh_results, last_refresh_query_rows
 
                 term_size = tty_terminal_size(fd)
                 term_lines = term_size.lines
-                pos = query_cursor_position(fd)
-                if pos is None:
-                    next_start_row = max(1, term_lines - 1)
-                    next_start_col = 1
-                elif len(query) < 18:
-                    next_start_row = pos[0]
-                    next_start_col = initial_cursor_col if trust_row_only else pos[1]
-                    initial_cursor_row = next_start_row
-                    initial_cursor_col = next_start_col
-                else:
-                    next_start_row = initial_cursor_row
-                    next_start_col = initial_cursor_col
-                    term_write(move_to(initial_cursor_row, initial_cursor_col))
-                    term_flush()
+                next_start_row = pos[0]
+                next_start_col = pos[1]
 
                 next_start_row = max(1, min(next_start_row, term_lines))
                 space_below = max(0, term_lines - next_start_row)
@@ -2875,6 +2869,47 @@ def run(
                 term_write(move_to(anchor_row, anchor_col))
                 term_flush()
 
+            def logical_cursor_terminal_position() -> tuple[int, int]:
+                term_size = tty_terminal_size(fd)
+                render_width = terminal_safe_render_width(term_size.columns, anchor_col)
+                query_width = query_text_render_width(render_width)
+                current_query_start, _, _, _ = wrapped_query_layout(
+                    query,
+                    cursor_pos,
+                    query_width,
+                    panel_rows,
+                )
+                query_rows = build_query_visual_rows(query, query_width)
+                cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
+                cursor_row = max(0, cursor_row_abs - current_query_start)
+                draw_col = anchor_col if cursor_row == 0 else max(1, anchor_col - 1)
+                return anchor_row + cursor_row, draw_col + cursor_col
+
+            def prepare_for_keypress() -> None:
+                nonlocal cursor_pos, start_row, start_col
+
+                reported = query_cursor_position(fd)
+                if reported is not None and reported != (start_row, start_col):
+                    term_size = tty_terminal_size(fd)
+                    render_width = terminal_safe_render_width(term_size.columns, anchor_col)
+                    query_width = query_text_render_width(render_width)
+                    relative_row = reported[0] - anchor_row
+                    relative_col = reported[1] - (
+                        anchor_col if relative_row == 0 else max(1, anchor_col - 1)
+                    ) - 1
+                    if 0 <= relative_row < query_rows_used:
+                        cursor_pos = query_pos_from_visual(
+                            query,
+                            query_width,
+                            query_start,
+                            relative_row,
+                            max(0, relative_col),
+                        )
+                    reanchor_from_position(reported)
+                else:
+                    term_write(move_to(*logical_cursor_terminal_position()))
+                    term_flush()
+
             def clear_after_query_suffix() -> None:
                 term_size = tty_terminal_size(fd)
                 render_width = terminal_safe_render_width(term_size.columns, anchor_col)
@@ -2970,6 +3005,11 @@ def run(
 
             try:
                 while True:
+                    # Each completed keypress leaves the physical cursor at
+                    # the prompt start. Restore that invariant before doing
+                    # any work for the next event.
+                    term_write(move_to(start_row, start_col))
+                    term_flush()
                     while True:
                         try:
                             (
@@ -3129,6 +3169,10 @@ def run(
                         total_count=total_count,
                     )
                     last_drawn_panel_rows = panel_rows
+                    # Keep the physical cursor at the stable prompt position
+                    # while waiting for the next keypress.
+                    term_write(move_to(start_row, start_col))
+                    term_flush()
 
                     if pending_event is None:
                         input_timeout: Optional[float] = 0.03
@@ -3140,7 +3184,7 @@ def run(
                     if ev == "timeout":
                         continue
 
-                    refresh_anchor_from_cursor()
+                    prepare_for_keypress()
     
                     if ev == "interrupt":
                         clear_panel_and_restore_cursor()
