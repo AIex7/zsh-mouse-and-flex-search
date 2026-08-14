@@ -2927,7 +2927,13 @@ def run(
                 term_write(move_to(anchor_row + row, draw_col + col + 2) + CLEAR_TO_END)
                 term_flush()
 
-            def clear_panel_and_restore_cursor() -> None:
+            def clear_panel_display() -> None:
+                term_lines = tty_terminal_size(fd).lines
+                clear_col = anchor_col if inline_with_prompt else 1
+                for row in range(anchor_row, term_lines + 1):
+                    term_write(move_to(row, clear_col if row == anchor_row else 1) + CLEAR_TO_END)
+
+            def clear_panel_and_restore_cursor(*, clear_display: bool = False) -> None:
                 nonlocal mouse_enabled, mouse_selecting, kitty_keyboard_enabled
                 if kitty_keyboard_enabled:
                     term_write(DISABLE_KITTY_KEYBOARD)
@@ -2936,6 +2942,8 @@ def run(
                     term_write(DISABLE_MOUSE)
                     mouse_enabled = False
                     mouse_selecting = False
+                if clear_display:
+                    clear_panel_display()
                 # Restore cursor to the exact prompt position captured at invocation start.
                 term_write(move_to(start_row, start_col))
                 term_flush()
@@ -3187,7 +3195,7 @@ def run(
                     prepare_for_keypress()
     
                     if ev == "interrupt":
-                        clear_panel_and_restore_cursor()
+                        clear_panel_and_restore_cursor(clear_display=True)
                         return None
                     if ev == "escape":
                         clear_panel_and_restore_cursor()
@@ -3473,7 +3481,7 @@ def run(
                         if my >= (anchor_row + query_rows_used) and my < anchor_row + panel_rows and not is_motion and button == 0:
                             continue
             except KeyboardInterrupt:
-                clear_panel_and_restore_cursor()
+                clear_panel_and_restore_cursor(clear_display=True)
                 return None
             finally:
                 search_stop.set()
