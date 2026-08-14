@@ -7,6 +7,7 @@ from functools import lru_cache
 import os
 import re
 import shutil
+from typing import Optional
 
 
 ANSI_STYLE_BY_TOKEN = {
@@ -162,14 +163,27 @@ def ansi_for_token(token: str) -> str:
 
 
 def highlight_tokens(query: str) -> list[str]:
+    """Highlight a complete command line without retaining editor state."""
     tokens = ["default"] * len(query)
     if not query:
         return tokens
+    _highlight_from(query, tokens, 0, True, [None] * (len(query) + 1))
+    return tokens
 
-    i = 0
-    expect_command = True
+
+def _highlight_from(
+    query: str,
+    tokens: list[str],
+    start: int,
+    expect_command: bool,
+    states: list[Optional[bool]],
+) -> None:
+    """Highlight from a lexical boundary, retaining the earlier token prefix."""
+    start = max(0, min(start, len(query)))
+    i = start
 
     while i < len(query):
+        states[i] = expect_command
         ch = query[i]
         if ch.isspace():
             i += 1
@@ -185,6 +199,8 @@ def highlight_tokens(query: str) -> list[str]:
             if op in COMMAND_SEPARATORS:
                 expect_command = True
             i += len(op)
+            if i < len(states):
+                states[i] = expect_command
             continue
 
         if ch in ("'", '"', "`"):
@@ -192,6 +208,8 @@ def highlight_tokens(query: str) -> list[str]:
             _mark(tokens, i, end, "string")
             i = end
             expect_command = False
+            if i < len(states):
+                states[i] = expect_command
             continue
 
         if ch == "$":
@@ -199,6 +217,8 @@ def highlight_tokens(query: str) -> list[str]:
             _mark(tokens, i, end, "variable")
             i = end
             expect_command = False
+            if i < len(states):
+                states[i] = expect_command
             continue
 
         start = i
@@ -238,8 +258,97 @@ def highlight_tokens(query: str) -> list[str]:
             expect_command = word in {"then", "do", "else", "elif", "time"}
         else:
             expect_command = False
+        if i < len(states):
+            states[i] = expect_command
 
-    return tokens
+
+class IncrementalHighlighter:
+    """Retains syntax tokens across edits to avoid re-lexing unchanged prefixes."""
+
+    def __init__(self) -> None:
+        self._query = ""
+        self._tokens: list[str] = []
+        self._states: list[Optional[bool]] = [True]
+
+    def highlight(self, query: str) -> list[str]:
+        if query == self._query:
+            return self._tokens
+
+        common = 0
+        common_limit = min(len(self._query), len(query))
+        while common < common_limit and self._query[common] == query[common]:
+            common += 1
+
+        start = self._relex_start(query, common)
+        expect_command = self._states[start] if start < len(self._states) else None
+        if expect_command is None:
+            start = 0
+            expect_command = True
+
+        tokens = self._tokens[:start] + ["default"] * (len(query) - start)
+        states: list[Optional[bool]] = [None] * (len(query) + 1)
+        states[:start] = self._states[:start]
+        _highlight_from(query, tokens, start, expect_command, states)
+
+        self._query = query
+        self._tokens = tokens
+        self._states = states
+        return tokens
+
+    @staticmethod
+    def _relex_start(query: str, changed_at: int) -> int:
+        """Find a boundary whose saved command state is safe to resume from."""
+        segment_start = 0
+        quote: Optional[str] = None
+        i = 0
+        while i < changed_at:
+            ch = query[i]
+            if quote is not None:
+                if quote != "'" and ch == "\\" and i + 1 < changed_at:
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch == "\\" and i + 1 < changed_at:
+                i += 2
+                continue
+            if ch in ("'", '"', "`"):
+                quote = ch
+                i += 1
+                continue
+            op = _match_operator(query, i)
+            if op is not None and i + len(op) <= changed_at:
+                if op in COMMAND_SEPARATORS:
+                    segment_start = i + len(op)
+                i += len(op)
+                continue
+            i += 1
+
+        # An edit inside a quote can change the interpretation of every
+        # later character in its command segment.
+        if quote is not None:
+            return segment_start
+        # These forms can consume punctuation or alter everything after them.
+        # Start from the line beginning so incomplete shell syntax remains
+        # identical to the complete highlighter while it is being typed.
+        if any(marker in query[:changed_at] for marker in ("$", "\\", "#")):
+            return 0
+        # A newly typed character can extend `;`, `|`, `&`, `<`, or `>` into
+        # a different multi-character operator with different command state.
+        if changed_at and query[changed_at - 1] in ";|&<>":
+            return 0
+
+        i = changed_at
+        while i > segment_start:
+            previous = query[i - 1]
+            if previous.isspace():
+                return i
+            if previous in ";|&(){}<>":
+                return i
+            i -= 1
+        return segment_start
 
 
 def _mark(tokens: list[str], start: int, end: int, kind: str) -> None:

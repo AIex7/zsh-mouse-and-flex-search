@@ -26,7 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, List, Optional
 
-from .syntax_highlighting import ansi_for_token, highlight_tokens
+from .syntax_highlighting import IncrementalHighlighter, ansi_for_token, highlight_tokens
 
 
 BASE16_TO_ANSI = {
@@ -2078,6 +2078,7 @@ def draw_panel(
     status_message: str = "",
     debug_note: str = "",
     total_count: Optional[int] = None,
+    syntax_tokens: Optional[list[str]] = None,
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = terminal_safe_render_width(width, anchor_col)
@@ -2109,7 +2110,8 @@ def draw_panel(
     cursor_row_abs, _cursor_col_abs = query_cursor_visual_position(query_rows, cursor_pos)
     visible_query_rows = query_rows[query_start : query_start + query_rows_used]
     sel = selection_bounds(sel_anchor, sel_end)
-    syntax_tokens = highlight_tokens(query)
+    if syntax_tokens is None:
+        syntax_tokens = highlight_tokens(query)
     for row, vrow in enumerate(visible_query_rows):
         seg_len = vrow.display_width
         query_parts: list[str] = [RESET]
@@ -2608,6 +2610,7 @@ def run(
             term_flush()
 
             query = ""
+            syntax_highlighter = IncrementalHighlighter()
             last_refresh_query: Optional[str] = None
             last_refresh_results: list[str] = []
             last_refresh_query_rows = 1
@@ -3169,6 +3172,7 @@ def run(
                     if selected >= offset + visible:
                         offset = selected - visible + 1
 
+                    syntax_tokens = syntax_highlighter.highlight(query)
                     query_start, _query_view_len, query_rows_used, results_visible = draw_panel(
                         anchor_row,
                         anchor_col,
@@ -3184,6 +3188,7 @@ def run(
                         status_message=status_message,
                         debug_note=debug_note,
                         total_count=total_count,
+                        syntax_tokens=syntax_tokens,
                     )
                     last_drawn_panel_rows = panel_rows
                     # Keep the physical cursor at the stable prompt position
