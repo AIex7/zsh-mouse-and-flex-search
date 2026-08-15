@@ -1869,9 +1869,8 @@ def query_text_render_width(render_width: int, lead_cols: int = 1) -> int:
 
 
 def terminal_safe_render_width(terminal_width: int, start_col: int) -> int:
-    # Avoid writing into the terminal's final column; doing so can arm
-    # autowrap and leave apparent blank rows after a resize.
-    return max(1, terminal_width - max(1, start_col))
+    # Use all columns from the starting column through the terminal edge.
+    return max(1, terminal_width - max(1, start_col) + 1)
 
 
 def query_window(query: str, cursor_pos: int, available: int) -> tuple[int, str]:
@@ -2083,7 +2082,7 @@ def draw_panel(
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = terminal_safe_render_width(width, anchor_col)
-    result_anchor_col = max(1, anchor_col - 1)
+    result_anchor_col = 1
     result_render_width = terminal_safe_render_width(width, result_anchor_col)
 
     def draw_col_for_row(row_offset: int) -> int:
@@ -2147,7 +2146,9 @@ def draw_panel(
             query_parts.append(RESET)
         if row_cursor_index == len(vrow.text):
             query_parts.append(f"{VISUAL_CURSOR_BG} {RESET}")
-        query_line = " " + "".join(query_parts)
+        # Only the first query row follows the prompt. Wrapped rows start at
+        # column one and therefore do not need the prompt lead space.
+        query_line = (" " if row == 0 else "") + "".join(query_parts)
         if row == 0 and debug_note:
             room = max(0, render_width - (seg_len + query_lead_cols))
             if room > 0:
@@ -2217,8 +2218,9 @@ def draw_panel(
     # Keep the hidden terminal cursor synchronized for the next position query.
     cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
     cursor_row = min(query_rows_used - 1, max(0, cursor_row_abs - query_start))
-    visual_cursor_col = cursor_col + query_lead_cols
-    cursor_col = max(0, min(cursor_col + query_lead_cols, render_width - 1))
+    cursor_lead_cols = query_lead_cols if cursor_row == 0 else 0
+    visual_cursor_col = cursor_col + cursor_lead_cols
+    cursor_col = max(0, min(cursor_col + cursor_lead_cols, render_width - 1))
     term_write(move_to(anchor_row + cursor_row, draw_col_for_row(cursor_row) + cursor_col))
     draw_panel._previous_visual_cursor = (
         anchor_row + cursor_row,
@@ -2606,7 +2608,7 @@ def run(
             def panel_clear_col(row: int, current_anchor_row: int, current_anchor_col: int) -> int:
                 if inline_with_prompt and row == current_anchor_row:
                     return current_anchor_col
-                return max(1, current_anchor_col - 1)
+                return 1
             term_write(move_to(anchor_row, anchor_col))
             term_flush()
 
@@ -2832,7 +2834,7 @@ def run(
                     clear_row, clear_col = query_cursor_visual_position(query_rows, common_length)
                     clear_row = max(0, clear_row - query_start)
                     clear_col = (
-                        next_anchor_col if clear_row == 0 else max(1, next_anchor_col - 1)
+                        next_anchor_col if clear_row == 0 else 1
                     ) + clear_col + 1
                     for row in range(
                         next_anchor_row + clear_row,
@@ -2851,7 +2853,7 @@ def run(
                 last_row_abs, last_col = query_cursor_visual_position(query_rows, len(query))
                 last_row = max(0, last_row_abs - query_start)
                 last_row_col = (
-                    next_anchor_col if last_row == 0 else max(1, next_anchor_col - 1)
+                    next_anchor_col if last_row == 0 else 1
                 ) + last_col + 1
                 term_write(move_to(next_anchor_row + last_row, last_row_col) + CLEAR_TO_END)
                 for result_index in range(max(len(last_refresh_results), len(current_results))):
@@ -2894,7 +2896,7 @@ def run(
                 query_rows = build_query_visual_rows(query, query_width)
                 cursor_row_abs, cursor_col = query_cursor_visual_position(query_rows, cursor_pos)
                 cursor_row = max(0, cursor_row_abs - current_query_start)
-                draw_col = anchor_col if cursor_row == 0 else max(1, anchor_col - 1)
+                draw_col = anchor_col if cursor_row == 0 else 1
                 return anchor_row + cursor_row, draw_col + cursor_col
 
             def prepare_for_keypress() -> None:
@@ -2907,7 +2909,7 @@ def run(
                     query_width = query_text_render_width(render_width)
                     relative_row = reported[0] - anchor_row
                     relative_col = reported[1] - (
-                        anchor_col if relative_row == 0 else max(1, anchor_col - 1)
+                        anchor_col if relative_row == 0 else 1
                     ) - 1
                     if 0 <= relative_row < query_rows_used:
                         cursor_pos = query_pos_from_visual(
@@ -2935,7 +2937,7 @@ def run(
                 query_rows = build_query_visual_rows(query, query_width)
                 row_abs, col = query_cursor_visual_position(query_rows, len(query))
                 row = max(0, row_abs - query_start)
-                draw_col = anchor_col if row == 0 else max(1, anchor_col - 1)
+                draw_col = anchor_col if row == 0 else 1
                 term_write(move_to(anchor_row + row, draw_col + col + 2) + CLEAR_TO_END)
                 term_flush()
 
@@ -3436,7 +3438,7 @@ def run(
                         # Query line interactions (including wrapped rows).
                         if anchor_row <= my < (anchor_row + query_rows_used):
                             click_row = my - anchor_row
-                            click_anchor_col = anchor_col if click_row == 0 else max(1, anchor_col - 1)
+                            click_anchor_col = anchor_col if click_row == 0 else 1
                             click_col = max(0, mx - click_anchor_col - 1)
                             click_pos = query_pos_from_visual(
                                 query,
