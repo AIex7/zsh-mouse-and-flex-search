@@ -1930,7 +1930,9 @@ def query_cursor_visual_position(rows: list[QueryVisualRow], cursor_pos: int) ->
     if not rows:
         return 0, 0
     for rindex, row in enumerate(rows):
-        if cursor_pos <= row.end:
+        # A wrapped-row boundary is the first character of the following
+        # row. Only end-of-input belongs to the final row.
+        if cursor_pos < row.end or (cursor_pos == row.end and rindex == len(rows) - 1):
             offset = max(0, min(cursor_pos - row.start, len(row.text)))
             col = text_display_width(row.text[:offset])
             col = max(0, min(col, row.display_width))
@@ -2207,6 +2209,10 @@ def draw_panel(
     for i, line in enumerate(query_lines[:query_rows_used]):
         draw_col = draw_col_for_row(i)
         term_write(move_to(anchor_row + i, draw_col) + line)
+        plain_line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        clear_col = draw_col + text_display_width(plain_line)
+        if clear_col <= width:
+            term_write(move_to(anchor_row + i, clear_col) + CLEAR_TO_END)
     remaining_rows = max(0, panel_rows - query_rows_used)
     for i, line in enumerate(result_lines[:remaining_rows]):
         result_row = anchor_row + query_rows_used + i
