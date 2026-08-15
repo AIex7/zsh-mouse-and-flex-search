@@ -1991,6 +1991,16 @@ def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optio
     return (min(sel_anchor, sel_end), max(sel_anchor, sel_end))
 
 
+def terminal_safe_result_text(text: str) -> str:
+    """Remove terminal control sequences from untrusted history text."""
+    # Strip OSC and CSI sequences first, then remove any remaining two-byte
+    # ESC sequence (including ESC E / NEL, which advances to a new line).
+    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", text)
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"\x1b.", "", text, flags=re.DOTALL)
+    return re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", text)
+
+
 def render_result_line(
     item: MatchResult,
     selected: bool,
@@ -2010,7 +2020,7 @@ def render_result_line(
     gutter_width = RESULT_PREFIX_WIDTH
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
     body_width = max(0, width - gutter_width - suffix_width)
-    display_text = item.text.replace("\r", " ").replace("\n", " ")
+    display_text = terminal_safe_result_text(item.text)
     text = truncate_text(display_text, body_width)
     ordered_positions = ordered_query_word_positions(query, item.text_lower if item.text_lower is not None else item.text.lower())
     pos_set = set(ordered_positions if ordered_positions is not None else item.positions)
