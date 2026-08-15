@@ -2027,11 +2027,11 @@ def render_result_line(
 
     if item.runtime_completion:
         if selected:
-            normal_style = RESET + style(fg=runtime_color, bold=True, italic=True)
-            match_style = RESET + style(fg=runtime_color, bold=True, italic=True, underline=underline_matches)
+            normal_style = RESET + style(fg=runtime_color, bold=True)
+            match_style = RESET + style(fg=runtime_color, bold=True, underline=underline_matches)
         else:
-            normal_style = RESET + style(fg=runtime_color, italic=True)
-            match_style = style(fg=runtime_color, italic=True, underline=underline_matches)
+            normal_style = RESET + style(fg=runtime_color)
+            match_style = style(fg=runtime_color, underline=underline_matches)
     else:
         if selected:
             normal_style = RESET + style(fg=result_color, bold=True)
@@ -2043,7 +2043,7 @@ def render_result_line(
             match_style = style(fg=result_color, underline=underline_matches)
 
     if item.runtime_completion:
-        selector_style = style(fg=runtime_color, bold=True, italic=True)
+        selector_style = style(fg=runtime_color, bold=True)
     else:
         selector_style = style(fg=result_color, bold=True)
     selector_source = FAILED_SELECTOR_GLYPH if item.failed else selector_glyph
