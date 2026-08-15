@@ -2119,6 +2119,10 @@ def draw_panel(
         panel_rows,
     )
     query_rows = build_query_visual_rows(query, query_width)
+    if len(query_rows) > 1:
+        # A wrapped or explicitly multiline query owns the panel; do not
+        # render results beneath it.
+        results_visible = 0
     cursor_row_abs, _cursor_col_abs = query_cursor_visual_position(query_rows, cursor_pos)
     visible_query_rows = query_rows[query_start : query_start + query_rows_used]
     sel = selection_bounds(sel_anchor, sel_end)
@@ -2213,7 +2217,7 @@ def draw_panel(
         clear_col = draw_col + text_display_width(plain_line)
         if clear_col <= width:
             term_write(move_to(anchor_row + i, clear_col) + CLEAR_TO_END)
-    remaining_rows = max(0, panel_rows - query_rows_used)
+    remaining_rows = results_visible
     for i, line in enumerate(result_lines[:remaining_rows]):
         result_row = anchor_row + query_rows_used + i
         term_write(move_to(result_row, result_anchor_col) + line)
