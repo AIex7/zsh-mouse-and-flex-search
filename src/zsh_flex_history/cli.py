@@ -2265,27 +2265,10 @@ def draw_panel(
     return query_start, query_view_len, query_rows_used, results_visible
 
 
-def read_key(fd: int, timeout: Optional[float] = 0.1, wake_fd: Optional[int] = None) -> tuple[str, object]:
-    def drain_wake_fd() -> None:
-        if wake_fd is None:
-            return
-        try:
-            while os.read(wake_fd, 4096):
-                pass
-        except BlockingIOError:
-            pass
-        except OSError:
-            pass
-
-    def select_input(wait_timeout: Optional[float]) -> tuple[bool, bool]:
-        read_fds = [fd]
-        if wake_fd is not None:
-            read_fds.append(wake_fd)
-        ready, _, _ = select.select(read_fds, [], [], wait_timeout)
-        resized = wake_fd is not None and wake_fd in ready
-        if resized:
-            drain_wake_fd()
-        return fd in ready, resized
+def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
+    def select_input(wait_timeout: Optional[float]) -> bool:
+        ready, _, _ = select.select([fd], [], [], wait_timeout)
+        return fd in ready
 
     def read_escape_tail() -> bytes:
         # Read an escape sequence byte-by-byte so we do not over-read into
@@ -2293,9 +2276,7 @@ def read_key(fd: int, timeout: Optional[float] = 0.1, wake_fd: Optional[int] = N
         seq = b""
         deadline = time.monotonic() + 0.05
         while time.monotonic() < deadline:
-            has_input, resized = select_input(0.01)
-            if resized and not has_input:
-                break
+            has_input = select_input(0.01)
             if not has_input:
                 if seq:
                     break
@@ -2441,9 +2422,7 @@ def read_key(fd: int, timeout: Optional[float] = 0.1, wake_fd: Optional[int] = N
         return bytes(buf).decode("utf-8", errors="replace")
 
     while True:
-        has_input, resized = select_input(timeout)
-        if resized and not has_input:
-            return "resize", None
+        has_input = select_input(timeout)
         if not has_input:
             return "timeout", None
         data = os.read(fd, 1)
@@ -2640,10 +2619,6 @@ def run(
                 anchor_row = max(1, start_row)
                 anchor_col = 1
                 panel_rows = max(1, term_lines - anchor_row + 1)
-            def panel_clear_col(row: int, current_anchor_row: int, current_anchor_col: int) -> int:
-                if inline_with_prompt and row == current_anchor_row:
-                    return current_anchor_col
-                return 1
             term_write(move_to(anchor_row, anchor_col))
             term_flush()
 

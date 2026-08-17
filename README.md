@@ -88,13 +88,6 @@ eval "$(zsh-flex-history-init-zsh --hook)"
 - Runtime path completion
   - Expands `$HOME` / `${HOME}`, `$PWD` / `${PWD}`, `$OLDPWD`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, `$XDG_CACHE_HOME`, `$XDG_STATE_HOME`, and `$TMPDIR` for filesystem lookup.
   - Keeps the variable expression in the completed command, such as `$HOME/Documents/`.
-- `ZSH_FLEX_HISTORY_RESIZE_DEBOUNCE_MS`
-  - Sets how long to wait after a terminal resize before recalculating the panel position.
-  - Defaults to `100`.
-
-
-
-
 ## Keys
 
 - `Up` / `Down` / Scroll: move selection
