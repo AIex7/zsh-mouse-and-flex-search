@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import random
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from zsh_flex_history import engine
 
@@ -58,6 +60,7 @@ class NativeFlexMatchTests(unittest.TestCase):
         ]
         native_candidates = engine.build_native_history_candidates(history)
         self.assertIsNotNone(native_candidates)
+        self.assertEqual(len(native_candidates), len(history))
         for query, candidate_indices in (
             ("git st", None),
             ("gst", None),
@@ -82,6 +85,47 @@ class NativeFlexMatchTests(unittest.TestCase):
                 [(item.score, item.positions, item.text) for item in expected_results],
                 query,
             )
+
+    def test_full_ordered_search_matches_python_fallback(self) -> None:
+        history = [
+            engine.make_history_entry("git status --short", cwd="/repo"),
+            engine.make_history_entry("git switch main", cwd="/other"),
+            engine.make_history_entry("git stash list", cwd="/repo", failed=True),
+            engine.make_history_entry("python -m pytest -q", cwd="/repo"),
+            engine.make_history_entry("git status --short", cwd="/other"),
+            engine.make_history_entry("docker compose up --build", cwd="/other"),
+            engine.make_history_entry("éclair deploy production", cwd="/repo"),
+        ]
+        native_candidates = engine.build_native_history_candidates(history)
+        self.assertIsNotNone(native_candidates)
+
+        for query, candidate_indices in (
+            ("", None),
+            ("g", None),
+            ("git st", None),
+            ("gst", None),
+            ("py", [1, 2, 3, 5, 6]),
+            ("écl", [0, 4, 6]),
+            ("does-not-exist", None),
+        ):
+            with patch.object(engine, "_native_flex_match", None):
+                expected_results, expected_indices = engine.search(
+                    query,
+                    history,
+                    candidate_indices=candidate_indices,
+                    limit=4,
+                    cwd=Path("/repo"),
+                )
+            actual_results, actual_indices = engine.search(
+                query,
+                history,
+                candidate_indices=candidate_indices,
+                limit=4,
+                cwd=Path("/repo"),
+                native_candidates=native_candidates,
+            )
+            self.assertEqual(actual_indices, expected_indices, query)
+            self.assertEqual(actual_results, expected_results, query)
 
 
 if __name__ == "__main__":

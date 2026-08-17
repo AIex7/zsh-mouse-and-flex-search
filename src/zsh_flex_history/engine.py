@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
 try:
+    from ._flex_match import NativeHistory as _NativeHistory
     from ._flex_match import flex_match as _native_flex_match
-    from ._flex_match import flex_match_many as _native_flex_match_many
 except ImportError:
+    _NativeHistory = None
     _native_flex_match = None
-    _native_flex_match_many = None
 
 ANSI_COLOR_NAMES = {
     "black": 0,
@@ -1181,11 +1181,13 @@ def dedupe_match_results_preserving_order(results: list[MatchResult]) -> list[Ma
     return deduped
 
 
-def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional[list[tuple[str, str]]]:
-    """Prepare text pairs once so the native batch matcher can scan history."""
-    if _native_flex_match_many is None:
+def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional[Any]:
+    """Copy searchable history text into a Rust-owned cache once per load."""
+    if _NativeHistory is None:
         return None
-    return [(entry.text, entry.text_lower or entry.text.lower()) for entry in history]
+    return _NativeHistory(
+        [(entry.text, entry.text_lower or entry.text.lower()) for entry in history]
+    )
 
 
 def search_history_only(
@@ -1194,7 +1196,7 @@ def search_history_only(
     *,
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
-    native_candidates: Optional[list[tuple[str, str]]] = None,
+    native_candidates: Optional[Any] = None,
 ) -> tuple[list[MatchResult], list[int]]:
     candidates: range | Sequence[int]
     if candidate_indices is None:
@@ -1232,11 +1234,10 @@ def search_history_only(
     matched_indices: list[int] = []
     history_results: list[MatchResult] = []
     if (
-        _native_flex_match_many is not None
-        and native_candidates is not None
+        native_candidates is not None
         and len(native_candidates) == len(history)
     ):
-        native_matches = _native_flex_match_many(query.lower(), native_candidates, candidate_indices)
+        native_matches = native_candidates.flex_match_many(query.lower(), candidate_indices)
         for idx, score, positions in native_matches:
             entry = history[idx]
             cmd = entry.text
@@ -1396,7 +1397,7 @@ def search(
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     cwd: Optional[Path] = None,
-    native_candidates: Optional[list[tuple[str, str]]] = None,
+    native_candidates: Optional[Any] = None,
 ) -> tuple[list[MatchResult], list[int]]:
     history_results, matched_indices = search_history_only(
         query,

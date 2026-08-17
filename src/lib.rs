@@ -1,5 +1,4 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PyTuple};
 
 const WORD_BOUNDARIES: &str = " _-/.:";
 
@@ -74,6 +73,150 @@ fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<
     Some((score, positions))
 }
 
+struct NativeCandidate {
+    text_lower: String,
+    boundary_characters: Vec<bool>,
+    character_count: usize,
+}
+
+impl NativeCandidate {
+    fn new(text: &str, text_lower: String) -> Self {
+        let boundary_characters = text
+            .chars()
+            .map(|character| WORD_BOUNDARIES.contains(character))
+            .collect();
+        let character_count = text.chars().count();
+        Self {
+            text_lower,
+            boundary_characters,
+            character_count,
+        }
+    }
+
+    fn match_flex(&self, query: &[char]) -> Option<(i64, Vec<usize>)> {
+        if query.is_empty() {
+            return Some((0, Vec::new()));
+        }
+
+        let mut positions = Vec::with_capacity(query.len());
+        let mut query_index = 0;
+        for (position, candidate_character) in self.text_lower.chars().enumerate() {
+            if candidate_character != query[query_index] {
+                continue;
+            }
+            positions.push(position);
+            query_index += 1;
+            if query_index == query.len() {
+                break;
+            }
+        }
+        if query_index != query.len() {
+            return None;
+        }
+
+        let mut contiguous = 0_i64;
+        let mut gap_penalty = 0_i64;
+        let mut boundary_bonus = 0_i64;
+        for (index, position) in positions.iter().copied().enumerate() {
+            if index == 0 {
+                if position == 0 {
+                    boundary_bonus += 12;
+                } else if self
+                    .boundary_characters
+                    .get(position - 1)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    boundary_bonus += 8;
+                }
+                continue;
+            }
+
+            let previous = positions[index - 1];
+            let gap = position - previous - 1;
+            gap_penalty += (gap * 2) as i64;
+            if gap == 0 {
+                contiguous += 10;
+            }
+            if self
+                .boundary_characters
+                .get(position - 1)
+                .copied()
+                .unwrap_or(false)
+            {
+                boundary_bonus += 6;
+            }
+        }
+
+        let first = positions[0];
+        let last = *positions.last()?;
+        let span = last - first + 1;
+        let start_bonus = (30_i64 - first as i64).max(0);
+        let compact_bonus = (20_i64 - (span - positions.len()) as i64).max(0);
+        let score = contiguous + boundary_bonus + start_bonus + compact_bonus
+            - gap_penalty
+            - (self.character_count / 8) as i64;
+        Some((score, positions))
+    }
+}
+
+/// History text stored and scanned entirely in Rust.
+///
+/// Python constructs this once when the daemon loads or refreshes history.
+/// Subsequent searches avoid extracting every Python tuple again.
+#[pyclass]
+struct NativeHistory {
+    candidates: Vec<NativeCandidate>,
+}
+
+#[pymethods]
+impl NativeHistory {
+    #[new]
+    fn new(candidates: Vec<(String, String)>) -> Self {
+        let candidates = candidates
+            .into_iter()
+            .map(|(text, text_lower)| NativeCandidate::new(&text, text_lower))
+            .collect();
+        Self { candidates }
+    }
+
+    fn __len__(&self) -> usize {
+        self.candidates.len()
+    }
+
+    fn flex_match_many(
+        &self,
+        py: Python<'_>,
+        query_lower: &str,
+        candidate_indices: Option<Vec<usize>>,
+    ) -> Vec<(usize, i64, Vec<usize>)> {
+        let query = compact_query(query_lower);
+        if query.is_empty() {
+            return Vec::new();
+        }
+        py.allow_threads(|| {
+            let mut matches = Vec::new();
+            if let Some(indices) = candidate_indices.as_deref() {
+                for &index in indices {
+                    let Some(candidate) = self.candidates.get(index) else {
+                        continue;
+                    };
+                    if let Some((score, positions)) = candidate.match_flex(&query) {
+                        matches.push((index, score, positions));
+                    }
+                }
+            } else {
+                for (index, candidate) in self.candidates.iter().enumerate() {
+                    if let Some((score, positions)) = candidate.match_flex(&query) {
+                        matches.push((index, score, positions));
+                    }
+                }
+            }
+            matches
+        })
+    }
+}
+
 #[pyfunction]
 fn flex_match(
     query_lower: &str,
@@ -83,52 +226,8 @@ fn flex_match(
     match_flex(&compact_query(query_lower), candidate, candidate_lower)
 }
 
-/// Match an entire history candidate list in one Python-to-Rust call.
-///
-/// `candidates` contains `(original_text, lowercased_text)` pairs. Optional
-/// indexes retain the caller's existing incremental-search candidate order.
-#[pyfunction]
-fn flex_match_many(
-    query_lower: &str,
-    candidates: &Bound<'_, PyList>,
-    candidate_indices: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Vec<(usize, i64, Vec<usize>)>> {
-    let query = compact_query(query_lower);
-    if query.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut matches = Vec::new();
-    let mut check_candidate = |index: usize| -> PyResult<()> {
-        let item = candidates.get_item(index)?;
-        let pair = item.downcast::<PyTuple>()?;
-        let candidate_object = pair.get_item(0)?;
-        let candidate_lower_object = pair.get_item(1)?;
-        let candidate: &str = candidate_object.extract()?;
-        let candidate_lower: &str = candidate_lower_object.extract()?;
-        if let Some((score, positions)) = match_flex(&query, candidate, candidate_lower) {
-            matches.push((index, score, positions));
-        }
-        Ok(())
-    };
-
-    if let Some(indices) = candidate_indices {
-        for raw_index in indices.try_iter()? {
-            let index: usize = raw_index?.extract()?;
-            if index < candidates.len() {
-                check_candidate(index)?;
-            }
-        }
-    } else {
-        for index in 0..candidates.len() {
-            check_candidate(index)?;
-        }
-    }
-    Ok(matches)
-}
-
 #[pymodule]
 fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_function(wrap_pyfunction!(flex_match, module)?)?;
-    module.add_function(wrap_pyfunction!(flex_match_many, module)?)
+    module.add_class::<NativeHistory>()?;
+    module.add_function(wrap_pyfunction!(flex_match, module)?)
 }
