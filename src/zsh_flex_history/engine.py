@@ -85,6 +85,7 @@ class MatchResult:
     text_lower: Optional[str] = None
     runtime_completion: bool = False
     failed: bool = False
+    words: tuple[str, ...] = ()
 
 
 @dataclass
@@ -94,6 +95,7 @@ class HistoryEntry:
     text_lower: str = ""
     timestamp: Optional[str] = None
     failed: bool = False
+    words: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -430,7 +432,14 @@ def make_history_entry(
     timestamp: Optional[str] = None,
     failed: bool = False,
 ) -> HistoryEntry:
-    return HistoryEntry(text=text, cwd=cwd, text_lower=text.lower(), timestamp=timestamp, failed=failed)
+    return HistoryEntry(
+        text=text,
+        cwd=cwd,
+        text_lower=text.lower(),
+        timestamp=timestamp,
+        failed=failed,
+        words=tuple(shell_words_for_matching(text)),
+    )
 
 
 def load_history(path: Path) -> list[HistoryEntry]:
@@ -1178,6 +1187,7 @@ def search_history_only(
                     cwd=entry.cwd,
                     text_lower=entry.text_lower,
                     failed=entry.failed,
+                    words=entry.words,
                 )
             )
         if candidate_indices is None:
@@ -1202,6 +1212,7 @@ def search_history_only(
         m.cwd = entry.cwd
         m.text_lower = entry.text_lower
         m.failed = entry.failed
+        m.words = entry.words
         history_results.append(m)
 
     if result_limit is not None:
@@ -1279,7 +1290,7 @@ def apply_prefix_priority(
     if query_words:
         for item in results:
             text_lower = item.text_lower if item.text_lower is not None else item.text.lower()
-            candidate_words = shell_words_for_matching(text_lower)
+            candidate_words = item.words or shell_words_for_matching(text_lower)
             matched_words = 0
             for query_word, candidate_word in zip(query_words, candidate_words):
                 if not candidate_word.startswith(query_word):
@@ -1349,6 +1360,7 @@ def match_result_to_payload(item: MatchResult) -> dict[str, Any]:
         "recency": item.recency,
         "cwd": item.cwd,
         "failed": item.failed,
+        "words": list(item.words),
     }
 
 
@@ -1362,9 +1374,12 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
     recency = payload.get("recency", 0)
     cwd = payload.get("cwd")
     failed = payload.get("failed", False)
+    words = payload.get("words", [])
     if not isinstance(text, str) or not isinstance(score, int) or not isinstance(positions, list):
         return None
     if cwd is not None and not isinstance(cwd, str):
+        return None
+    if not isinstance(words, list) or not all(isinstance(word, str) for word in words):
         return None
     parsed_positions: list[int] = []
     for pos in positions:
@@ -1379,6 +1394,7 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
         recency=int(recency) if isinstance(recency, int) else 0,
         cwd=cwd,
         failed=bool(failed),
+        words=tuple(words),
     )
 
 
