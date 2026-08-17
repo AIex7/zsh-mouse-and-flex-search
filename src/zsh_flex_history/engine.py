@@ -246,6 +246,7 @@ DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 ENABLE_KITTY_KEYBOARD = "\x1b[>1u"
 DISABLE_KITTY_KEYBOARD = "\x1b[<u"
 MAX_RETURNED_RESULTS = 100
+MAX_CACHED_CANDIDATE_INDICES = 10_000
 FIXED_MATCH_TEXT_WIDTH = 3000
 RESULT_PREFIX_WIDTH = 2
 SELECTOR_GLYPH = "●"
@@ -742,6 +743,13 @@ def history_file_signature(path: Path) -> tuple[int, int]:
 def daemon_debug_log(enabled: bool, message: str) -> None:
     if enabled:
         print(f"[zsh_flex_history daemon] {message}", file=sys.stderr)
+
+
+def daemon_matched_indices_payload(query: str, matched_indices: list[int]) -> Optional[list[int]]:
+    """Return only candidate indexes the client can reuse in its next request."""
+    if query and len(matched_indices) <= MAX_CACHED_CANDIDATE_INDICES:
+        return matched_indices
+    return None
 
 
 def query_equals_candidate(query: str, candidate: str) -> bool:
@@ -1555,7 +1563,7 @@ class HistoryDaemonClient:
         cwd: Optional[str] = None,
     ) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
         payload: dict[str, Any] = {"action": "search_history", "query": query}
-        if candidate_indices is not None and len(candidate_indices) <= 10_000:
+        if candidate_indices is not None and len(candidate_indices) <= MAX_CACHED_CANDIDATE_INDICES:
             payload["candidate_indices"] = list(candidate_indices)
         if limit is not None:
             payload["limit"] = limit
@@ -1754,12 +1762,10 @@ def run_history_daemon(
                         current_cwd=current_cwd,
                     )
                     matched_count = len(matched_indices)
-                    # Avoid sending a huge full-history index list for the
-                    # empty query on startup; for any non-empty query, return
-                    # full indices to preserve incremental narrowing behavior.
-                    indices_payload: Optional[list[int]] = None
-                    if query != "":
-                        indices_payload = matched_indices
+                    # The client never sends candidate lists over this limit
+                    # back to us, so returning them only wastes JSON encoding,
+                    # socket traffic, and frontend memory.
+                    indices_payload = daemon_matched_indices_payload(query, matched_indices)
                     daemon_write_response(
                         conn,
                         {
