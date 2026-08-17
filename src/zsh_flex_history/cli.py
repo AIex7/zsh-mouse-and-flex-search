@@ -371,6 +371,57 @@ def query_cursor_position(fd: int) -> Optional[tuple[int, int]]:
     return last_match
 
 
+def _scale_hex_component(component: str) -> int:
+    if not component:
+        raise ValueError("empty color component")
+    value = int(component, 16)
+    max_value = (16 ** len(component)) - 1
+    if max_value <= 0:
+        return 0
+    return round((value / max_value) * 255)
+
+
+def query_cursor_color(fd: int) -> Optional[str]:
+    """Return the terminal's cursor color from OSC 12, when supported."""
+    while True:
+        ready, _, _ = select.select([fd], [], [], 0)
+        if not ready:
+            break
+        try:
+            os.read(fd, 4096)
+        except OSError:
+            break
+
+    term_write("\x1b]12;?\x07")
+    term_flush()
+    buf = bytearray()
+    deadline = time.monotonic() + 0.15
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.02)
+        if not ready:
+            continue
+        try:
+            chunk = os.read(fd, 128)
+        except OSError:
+            return None
+        if not chunk:
+            continue
+        buf.extend(chunk)
+        if b"\x07" in buf or b"\x1b\\" in buf:
+            break
+
+    match = re.search(rb"\x1b\]12;rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)(?:\x07|\x1b\\)", bytes(buf))
+    if match is None:
+        return None
+    try:
+        r = _scale_hex_component(match.group(1).decode("ascii"))
+        g = _scale_hex_component(match.group(2).decode("ascii"))
+        b = _scale_hex_component(match.group(3).decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return rgb_to_hex(r, g, b)
+
+
 def normalize_cwd_value(cwd: str) -> str:
     stripped = cwd.strip()
     if not stripped:
@@ -2416,7 +2467,7 @@ def run(
     history_client: Optional[HistoryDaemonClient] = None,
     empty_space_command: Optional[str] = None,
 ) -> Optional[tuple[str, bool]]:
-    global TERM_OUT
+    global TERM_OUT, VISUAL_CURSOR_BG
     tty_in_file = None
     tty_out_file = None
     current_cwd_text = normalize_cwd_value(os.getcwd())
@@ -2457,6 +2508,12 @@ def run(
     min_panel_rows = 1 + min_result_rows
     try:
         with RawTerminal(fd) as rt:
+            # Respect an explicit color override. Otherwise mirror the
+            # terminal's real cursor color when it answers OSC 12.
+            if _cursor_color is None and _cursor_color_rgb is None:
+                cursor_color = query_cursor_color(fd)
+                if cursor_color is not None:
+                    VISUAL_CURSOR_BG = style(fg_rgb=DORIC["fg_main"], bg_rgb=cursor_color)
             term_size = tty_terminal_size(fd)
             term_lines = term_size.lines
             pos = query_cursor_position(fd)
