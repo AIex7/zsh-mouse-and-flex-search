@@ -29,25 +29,6 @@ from typing import Any, List, Optional
 from .syntax_highlighting import IncrementalHighlighter, ansi_for_token, highlight_tokens
 
 
-BASE16_TO_ANSI = {
-    "base00": 0,
-    "base01": 8,
-    "base02": 0,
-    "base03": 8,
-    "base04": 7,
-    "base05": 7,
-    "base06": 15,
-    "base07": 15,
-    "base08": 1,
-    "base09": 9,
-    "base0A": 3,
-    "base0B": 2,
-    "base0C": 6,
-    "base0D": 4,
-    "base0E": 5,
-    "base0F": 9,
-}
-
 ANSI_COLOR_NAMES = {
     "black": 0,
     "red": 1,
@@ -172,14 +153,6 @@ def cached_directory_listing(directory: Path) -> Optional[tuple[DirectoryListing
     return cached_entries
 
 
-def prime_directory_listing_cache(directory: Path) -> None:
-    cached_directory_listing(directory)
-
-
-def base16_ansi(name: str) -> int:
-    return BASE16_TO_ANSI[name]
-
-
 def fg_code(slot: int) -> str:
     if 0 <= slot <= 7:
         return str(30 + slot)
@@ -213,17 +186,6 @@ def color_value_from_env(name: str) -> tuple[Optional[int], Optional[str]]:
     if raw.startswith("#") and re.fullmatch(r"#[0-9a-f]{6}", raw):
         return None, raw
     return ansi_color_from_env(name, None), None
-
-
-def int_from_env(name: str, default: int, *, minimum: int = 0) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(minimum, value)
 
 
 def hex_to_rgb(value: str) -> tuple[int, int, int]:
@@ -348,12 +310,6 @@ def normalize_pasted_text(text: str) -> str:
     return normalized
 
 
-def normalize_shell_command(text: str) -> str:
-    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
-    cleaned = cleaned.replace("\\\n", "")
-    return cleaned.strip("\n")
-
-
 def supports_kitty_keyboard_protocol() -> bool:
     term = os.environ.get("TERM", "")
     return bool(os.environ.get("KITTY_WINDOW_ID")) or "kitty" in term.lower()
@@ -413,58 +369,6 @@ def query_cursor_position(fd: int) -> Optional[tuple[int, int]]:
             # waiting out the full timeout on every startup.
             break
     return last_match
-
-
-def _scale_hex_component(component: str) -> int:
-    if not component:
-        raise ValueError("empty color component")
-    value = int(component, 16)
-    max_value = (16 ** len(component)) - 1
-    if max_value <= 0:
-        return 0
-    return round((value / max_value) * 255)
-
-
-def query_cursor_color(fd: int) -> Optional[str]:
-    # Ask the terminal for its cursor color using OSC 12. Many terminals do
-    # not support this, so callers must treat the result as best-effort only.
-    while True:
-        ready, _, _ = select.select([fd], [], [], 0)
-        if not ready:
-            break
-        try:
-            os.read(fd, 4096)
-        except OSError:
-            break
-
-    term_write("\x1b]12;?\x07")
-    term_flush()
-    buf = bytearray()
-    deadline = time.monotonic() + 0.15
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([fd], [], [], 0.02)
-        if not ready:
-            continue
-        try:
-            chunk = os.read(fd, 128)
-        except OSError:
-            return None
-        if not chunk:
-            continue
-        buf.extend(chunk)
-        if b"\x07" in buf or b"\x1b\\" in buf:
-            break
-
-    match = re.search(rb"\x1b\]12;rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)(?:\x07|\x1b\\)", bytes(buf))
-    if match is None:
-        return None
-    try:
-        r = _scale_hex_component(match.group(1).decode("ascii"))
-        g = _scale_hex_component(match.group(2).decode("ascii"))
-        b = _scale_hex_component(match.group(3).decode("ascii"))
-    except (UnicodeDecodeError, ValueError):
-        return None
-    return rgb_to_hex(r, g, b)
 
 
 def normalize_cwd_value(cwd: str) -> str:
@@ -761,21 +665,6 @@ def update_custom_history_exit_status(
     except (OSError, sqlite3.Error):
         return False
     return True
-
-
-def spawn_history_loader(path: Path) -> queue.Queue[tuple[str, object]]:
-    updates: queue.Queue[tuple[str, object]] = queue.Queue()
-
-    def _load() -> None:
-        try:
-            loaded = load_history(path)
-            updates.put(("loaded", loaded))
-        except Exception as exc:
-            updates.put(("error", exc))
-
-    thread = threading.Thread(target=_load, daemon=True, name="history-loader")
-    thread.start()
-    return updates
 
 
 def default_daemon_socket_path(*, use_custom_history: bool = False) -> Path:
@@ -1871,14 +1760,6 @@ def query_text_render_width(render_width: int, lead_cols: int = 1) -> int:
 def terminal_safe_render_width(terminal_width: int, start_col: int) -> int:
     # Use all columns from the starting column through the terminal edge.
     return max(1, terminal_width - max(1, start_col) + 1)
-
-
-def query_window(query: str, cursor_pos: int, available: int) -> tuple[int, str]:
-    if available <= 0:
-        return 0, ""
-    max_start = max(0, len(query) - available)
-    start = min(max(0, cursor_pos - available + 1), max_start)
-    return start, query[start : start + available]
 
 
 @dataclass
