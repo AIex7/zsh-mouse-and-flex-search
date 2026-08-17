@@ -32,6 +32,13 @@ from . import engine
 from .engine import *
 from .engine import _cursor_color, _cursor_color_rgb
 
+
+_TERMINAL_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
+_TERMINAL_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_TERMINAL_ESC_RE = re.compile(r"\x1b.", flags=re.DOTALL)
+_TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
+_SGR_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 def truncate_text(text: str, width: int) -> str:
     if width <= 0:
         return ""
@@ -203,10 +210,10 @@ def terminal_safe_result_text(text: str) -> str:
     """Remove terminal control sequences from untrusted history text."""
     # Strip OSC and CSI sequences first, then remove any remaining two-byte
     # ESC sequence (including ESC E / NEL, which advances to a new line).
-    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", text)
-    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
-    text = re.sub(r"\x1b.", "", text, flags=re.DOTALL)
-    return re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", text)
+    text = _TERMINAL_OSC_RE.sub("", text)
+    text = _TERMINAL_CSI_RE.sub("", text)
+    text = _TERMINAL_ESC_RE.sub("", text)
+    return _TERMINAL_CONTROL_RE.sub(" ", text)
 
 
 def render_result_line(
@@ -454,7 +461,7 @@ def draw_panel(
     for i, line in enumerate(query_lines[:query_rows_used]):
         draw_col = draw_col_for_row(i)
         term_write(move_to(anchor_row + i, draw_col) + line)
-        plain_line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        plain_line = _SGR_ESCAPE_RE.sub("", line)
         clear_col = draw_col + text_display_width(plain_line)
         if clear_col <= width:
             term_write(move_to(anchor_row + i, clear_col) + CLEAR_TO_END)
@@ -462,7 +469,7 @@ def draw_panel(
     for i, line in enumerate(result_lines[:remaining_rows]):
         result_row = anchor_row + query_rows_used + i
         term_write(move_to(result_row, result_anchor_col) + line)
-        plain_line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        plain_line = _SGR_ESCAPE_RE.sub("", line)
         clear_col = result_anchor_col + text_display_width(plain_line)
         if clear_col <= width:
             term_write(move_to(result_row, clear_col) + CLEAR_TO_END)
