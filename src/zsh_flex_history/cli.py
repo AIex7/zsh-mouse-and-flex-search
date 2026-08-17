@@ -231,31 +231,21 @@ def render_result_line(
     if width <= 0:
         return ""
 
-    underline_matches = False
     gutter_width = RESULT_PREFIX_WIDTH
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
     body_width = max(0, width - gutter_width - suffix_width)
     display_text = terminal_safe_result_text(item.text)
     text = truncate_text(display_text, body_width)
-    ordered_positions = ordered_query_word_positions(query, item.text_lower if item.text_lower is not None else item.text.lower())
-    pos_set = set(ordered_positions if ordered_positions is not None else item.positions)
-
     if item.runtime_completion:
         if selected:
             normal_style = RESET + style(fg=runtime_color, bold=True)
-            match_style = RESET + style(fg=runtime_color, bold=True, underline=underline_matches)
         else:
             normal_style = RESET + style(fg=runtime_color)
-            match_style = style(fg=runtime_color, underline=underline_matches)
     else:
         if selected:
             normal_style = RESET + style(fg=result_color, bold=True)
         else:
             normal_style = RESET
-        if selected:
-            match_style = RESET + style(fg=result_color, bold=True, underline=underline_matches)
-        else:
-            match_style = style(fg=result_color, underline=underline_matches)
 
     if item.runtime_completion:
         selector_style = style(fg=runtime_color, bold=True)
@@ -270,12 +260,10 @@ def render_result_line(
 
     out: list[str] = []
     active_style = ""
-    for i, ch in enumerate(text):
-        is_match_char = i in pos_set and ch != " "
-        target_style = match_style if is_match_char else normal_style
-        if target_style != active_style:
-            out.append(target_style if target_style else RESET)
-            active_style = target_style
+    for ch in text:
+        if normal_style != active_style:
+            out.append(normal_style if normal_style else RESET)
+            active_style = normal_style
         out.append(ch)
     if suffix_text:
         if normal_style != active_style:
