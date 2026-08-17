@@ -177,11 +177,12 @@ def wrapped_query_layout(
     render_width: int,
     panel_rows: int,
     continuation_width: Optional[int] = None,
+    query_rows: Optional[list[QueryVisualRow]] = None,
 ) -> tuple[int, int, int, int]:
     render_width = max(1, render_width)
     cursor_pos = max(0, min(cursor_pos, len(query)))
     query_rows_limit = max(1, panel_rows - 1)
-    rows = build_query_visual_rows(query, render_width, continuation_width)
+    rows = query_rows if query_rows is not None else build_query_visual_rows(query, render_width, continuation_width)
     cursor_row, _cursor_col = query_cursor_visual_position(rows, cursor_pos)
     query_start = max(0, cursor_row - (query_rows_limit - 1))
     query_rows_used = min(query_rows_limit, max(1, len(rows) - query_start))
@@ -217,12 +218,12 @@ def render_result_line(
     unselected_white: bool = False,
     suffix_text: str = "",
     selector_glyph: str = SELECTOR_GLYPH,
+    result_color: Optional[int] = None,
+    runtime_color: Optional[int] = None,
 ) -> str:
     if width <= 0:
         return ""
 
-    result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None)
-    runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None)
     underline_matches = False
     gutter_width = RESULT_PREFIX_WIDTH
     suffix_width = text_display_width(suffix_text) + 4 if suffix_text else 0
@@ -296,6 +297,8 @@ def draw_panel(
     debug_note: str = "",
     total_count: Optional[int] = None,
     syntax_tokens: Optional[list[str]] = None,
+    query_rows: Optional[list[QueryVisualRow]] = None,
+    render_line_cache: Optional[dict[tuple[object, ...], str]] = None,
 ) -> tuple[int, int, int, int]:
     anchor_col = max(1, anchor_col)
     render_width = terminal_safe_render_width(width, anchor_col)
@@ -327,8 +330,10 @@ def draw_panel(
         query_width,
         panel_rows,
         continuation_query_width,
+        query_rows,
     )
-    query_rows = build_query_visual_rows(query, query_width, continuation_query_width)
+    if query_rows is None:
+        query_rows = build_query_visual_rows(query, query_width, continuation_query_width)
     if len(query_rows) > 1:
         # A wrapped or explicitly multiline query owns the panel; do not
         # render results beneath it.
@@ -388,6 +393,8 @@ def draw_panel(
     top_remaining = max(0, effective_total - results_visible)
     use_visible_total_for_more = top_remaining <= 97
     shared_result_width = max(1, min(result_render_width, RESULT_PREFIX_WIDTH + FIXED_MATCH_TEXT_WIDTH))
+    result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None)
+    runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None)
     visible_result_count = min(results_visible, max(0, len(results) - offset))
     for i in range(results_visible):
         idx = offset + i
@@ -404,15 +411,38 @@ def draw_panel(
             remaining = max(0, len(results) - (offset + results_visible))
         is_last_visible_row = i == (results_visible - 1)
         # more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
-        base_line = render_result_line(
-            results[idx],
-            idx == selected,
+        item = results[idx]
+        is_selected = idx == selected
+        cache_key = (
+            item.text,
+            item.text_lower,
+            tuple(item.positions),
+            item.runtime_completion,
+            item.failed,
+            is_selected,
             shared_result_width,
-            query=query,
-            unselected_white=True,
-            suffix_text="",
-            selector_glyph=SELECTOR_GLYPH,
+            query,
+            SELECTOR_GLYPH,
+            result_color,
+            runtime_color,
         )
+        base_line = render_line_cache.get(cache_key) if render_line_cache is not None else None
+        if base_line is None:
+            base_line = render_result_line(
+                item,
+                is_selected,
+                shared_result_width,
+                query=query,
+                unselected_white=True,
+                suffix_text="",
+                selector_glyph=SELECTOR_GLYPH,
+                result_color=result_color,
+                runtime_color=runtime_color,
+            )
+            if render_line_cache is not None:
+                if len(render_line_cache) >= 2048:
+                    render_line_cache.clear()
+                render_line_cache[cache_key] = base_line
         result_lines.append(base_line)
 
     final_query_row_abs, final_query_col = query_cursor_visual_position(query_rows, len(query))
@@ -904,6 +934,8 @@ def run(
             search_stop = threading.Event()
             queued_search_key: Optional[str] = None
             preferred_runtime_row: Optional[int] = None
+            runtime_completion_cache: dict[tuple[str, int], list[MatchResult]] = {}
+            render_line_cache: dict[tuple[object, ...], str] = {}
 
             def search_candidates_for(query_text: str) -> Optional[list[int]]:
                 if history_client is not None:
@@ -1318,9 +1350,10 @@ def run(
                     render_width = terminal_safe_render_width(width, anchor_col)
                     query_width = query_text_render_width(render_width)
                     continuation_query_width = terminal_safe_render_width(width, 1)
+                    query_rows = build_query_visual_rows(query, query_width, continuation_query_width)
                     required_query_rows = max(
                         1,
-                        len(build_query_visual_rows(query, query_width, continuation_query_width)),
+                        len(query_rows),
                     )
                     desired_panel_rows = max(min_panel_rows, required_query_rows + min_result_rows)
                     max_panel_rows = max(1, term_lines - anchor_row + 1)
@@ -1344,6 +1377,7 @@ def run(
                         query_width,
                         panel_rows,
                         continuation_query_width,
+                        query_rows,
                     )
                     visible = max(1, layout_results_visible)
                     cache_key = query
@@ -1367,13 +1401,19 @@ def run(
                         runtime_limit = 2
                     elif not results:
                         runtime_limit = 3
-                    runtime_completions = runtime_completion_matches(
-                        query,
-                        cursor_pos,
-                        startup_entries,
-                        cwd=current_cwd_path,
-                        limit=MAX_RETURNED_RESULTS,
-                    )
+                    runtime_cache_key = (query, cursor_pos)
+                    runtime_completions = runtime_completion_cache.get(runtime_cache_key)
+                    if runtime_completions is None:
+                        runtime_completions = runtime_completion_matches(
+                            query,
+                            cursor_pos,
+                            startup_entries,
+                            cwd=current_cwd_path,
+                            limit=MAX_RETURNED_RESULTS,
+                        )
+                        if len(runtime_completion_cache) >= 128:
+                            runtime_completion_cache.clear()
+                        runtime_completion_cache[runtime_cache_key] = runtime_completions
                     results = insert_runtime_completions(
                         results,
                         runtime_completions,
@@ -1421,6 +1461,8 @@ def run(
                         debug_note=debug_note,
                         total_count=total_count,
                         syntax_tokens=syntax_tokens,
+                        query_rows=query_rows,
+                        render_line_cache=render_line_cache,
                     )
                     skip_previous_cursor_clear = False
                     last_drawn_panel_rows = panel_rows
