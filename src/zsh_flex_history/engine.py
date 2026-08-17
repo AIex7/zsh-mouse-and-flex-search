@@ -24,6 +24,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
+try:
+    from ._flex_match import flex_match as _native_flex_match
+    from ._flex_match import flex_match_many as _native_flex_match_many
+except ImportError:
+    _native_flex_match = None
+    _native_flex_match_many = None
+
 ANSI_COLOR_NAMES = {
     "black": 0,
     "red": 1,
@@ -763,7 +770,7 @@ def filter_exact_query_match(query: str, results: list[MatchResult]) -> list[Mat
     return [item for item in results if not query_equals_candidate(query, item.text)]
 
 
-def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
+def _python_flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
     if not query:
         return MatchResult(candidate, 0, [], text_lower=candidate_lower or candidate.lower())
 
@@ -813,6 +820,18 @@ def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = N
     score -= len(candidate) // 8
 
     return MatchResult(candidate, score, positions, text_lower=c)
+
+
+def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
+    """Use the native matcher when installed, with an exact Python fallback."""
+    c = candidate_lower or candidate.lower()
+    if _native_flex_match is not None:
+        matched = _native_flex_match(query.lower(), candidate, c)
+        if matched is None:
+            return None
+        score, positions = matched
+        return MatchResult(candidate, score, positions, text_lower=c)
+    return _python_flex_match(query, candidate, candidate_lower=c)
 
 
 def token_bounds(query: str, cursor_pos: int) -> tuple[int, int]:
@@ -1162,12 +1181,20 @@ def dedupe_match_results_preserving_order(results: list[MatchResult]) -> list[Ma
     return deduped
 
 
+def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional[list[tuple[str, str]]]:
+    """Prepare text pairs once so the native batch matcher can scan history."""
+    if _native_flex_match_many is None:
+        return None
+    return [(entry.text, entry.text_lower or entry.text.lower()) for entry in history]
+
+
 def search_history_only(
     query: str,
     history: list[HistoryEntry],
     *,
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
+    native_candidates: Optional[list[tuple[str, str]]] = None,
 ) -> tuple[list[MatchResult], list[int]]:
     candidates: range | Sequence[int]
     if candidate_indices is None:
@@ -1204,24 +1231,50 @@ def search_history_only(
 
     matched_indices: list[int] = []
     history_results: list[MatchResult] = []
-    for idx in candidates:
-        entry = history[idx]
-        cmd = entry.text
-        m = flex_match(query, cmd, candidate_lower=entry.text_lower)
-        if m is None:
-            continue
-        if query_equals_candidate(query, cmd):
-            continue
+    if (
+        _native_flex_match_many is not None
+        and native_candidates is not None
+        and len(native_candidates) == len(history)
+    ):
+        native_matches = _native_flex_match_many(query.lower(), native_candidates, candidate_indices)
+        for idx, score, positions in native_matches:
+            entry = history[idx]
+            cmd = entry.text
+            if query_equals_candidate(query, cmd):
+                continue
+            matched_indices.append(idx)
+            history_results.append(
+                MatchResult(
+                    cmd,
+                    score,
+                    positions,
+                    exact=False,
+                    recency=-idx,
+                    cwd=entry.cwd,
+                    text_lower=entry.text_lower,
+                    failed=entry.failed,
+                    words=entry.words,
+                )
+            )
+    else:
+        for idx in candidates:
+            entry = history[idx]
+            cmd = entry.text
+            m = flex_match(query, cmd, candidate_lower=entry.text_lower)
+            if m is None:
+                continue
+            if query_equals_candidate(query, cmd):
+                continue
 
-        matched_indices.append(idx)
+            matched_indices.append(idx)
 
-        m.exact = query_equals_candidate(query, cmd)
-        m.recency = -idx
-        m.cwd = entry.cwd
-        m.text_lower = entry.text_lower
-        m.failed = entry.failed
-        m.words = entry.words
-        history_results.append(m)
+            m.exact = query_equals_candidate(query, cmd)
+            m.recency = -idx
+            m.cwd = entry.cwd
+            m.text_lower = entry.text_lower
+            m.failed = entry.failed
+            m.words = entry.words
+            history_results.append(m)
 
     if result_limit is not None:
         history_results = history_results[:result_limit]
@@ -1343,11 +1396,13 @@ def search(
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     cwd: Optional[Path] = None,
+    native_candidates: Optional[list[tuple[str, str]]] = None,
 ) -> tuple[list[MatchResult], list[int]]:
     history_results, matched_indices = search_history_only(
         query,
         history,
         candidate_indices=candidate_indices,
+        native_candidates=native_candidates,
     )
     current_cwd = normalize_cwd_value(str(cwd)) if cwd is not None else None
     results = apply_prefix_priority(
@@ -1674,6 +1729,7 @@ def run_history_daemon(
         use_custom_history=use_custom_history,
         history_length=history_length if use_custom_history else None,
     )
+    native_history_candidates = build_native_history_candidates(history)
     signature = history_file_signature(history_path)
 
     try:
@@ -1722,6 +1778,7 @@ def run_history_daemon(
                             use_custom_history=use_custom_history,
                             existing_history=history if use_custom_history else None,
                         )
+                        native_history_candidates = build_native_history_candidates(history)
                         signature = new_signature
 
                     action = request.get("action")
@@ -1754,6 +1811,7 @@ def run_history_daemon(
                         history,
                         candidate_indices=candidate_indices,
                         limit=None,
+                        native_candidates=native_history_candidates,
                     )
                     history_results = apply_prefix_priority(
                         query,

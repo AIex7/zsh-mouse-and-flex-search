@@ -1,0 +1,12 @@
+[package]
+name = "zsh-flex-history-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+
+[lib]
+name = "_flex_match"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module"] }

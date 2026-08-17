@@ -41,6 +41,9 @@ Then remove this line from `${ZDOTDIR:-$HOME}/.zshrc`:
 eval "$(zsh-flex-history-init-zsh --hook)"
 ```
 
+The local/Git installation builds a small Rust extension for fast flex matching,
+so it requires a current [Rust toolchain](https://www.rust-lang.org/tools/install).
+
 ## Behavior
 
 - Uses in-order flexible fuzzy matching (similar to Emacs `flex`).

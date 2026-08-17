@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 history.db
+target/
+src/zsh_flex_history/_flex_match*.so

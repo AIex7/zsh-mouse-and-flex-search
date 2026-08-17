@@ -868,6 +868,7 @@ def run(
             results_visible = max(1, panel_rows - 1)
             render_width = 1
             all_indices: Sequence[int] = range(0)
+            native_history_candidates = build_native_history_candidates(history)
             initial_matched_indices: Optional[list[int]] = None
             initial_matched_count: Optional[int] = None
             if history_client is not None:
@@ -897,6 +898,7 @@ def run(
                     candidate_indices=all_indices,
                     limit=MAX_RETURNED_RESULTS,
                     cwd=current_cwd_path,
+                    native_candidates=native_history_candidates,
                 )
                 initial_matched_indices = all_indices
                 initial_matched_count = len(all_indices)
@@ -991,6 +993,7 @@ def run(
                         candidate_indices=candidate_indices,
                         limit=MAX_RETURNED_RESULTS,
                         cwd=current_cwd_path,
+                        native_candidates=native_history_candidates,
                     )
                     matched_count = len(matched_indices) if matched_indices is not None else None
                 total_count = max(len(resolved_results), matched_count or 0)
@@ -1323,6 +1326,7 @@ def run(
                                 if isinstance(loaded_history, list):
                                     history = loaded_history
                                     all_indices = range(len(history))
+                                    native_history_candidates = build_native_history_candidates(history)
                                     last_query = ""
                                     last_matched_indices = all_indices
                                     initial_results, _ = search(
@@ -1332,6 +1336,7 @@ def run(
                                         candidate_indices=all_indices,
                                         limit=MAX_RETURNED_RESULTS,
                                         cwd=current_cwd_path,
+                                        native_candidates=native_history_candidates,
                                     )
                                     initial_total_count = max(len(initial_results), len(all_indices))
                                     match_cache = {
