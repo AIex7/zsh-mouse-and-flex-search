@@ -19,6 +19,7 @@ import threading
 import time
 import tempfile
 import tty
+from array import array
 from datetime import datetime, timezone
 import unicodedata
 from argparse import SUPPRESS, ArgumentParser
@@ -903,8 +904,13 @@ def run(
             last_query = ""
             last_matched_indices = initial_matched_indices
             initial_total_count = max(len(initial_results), initial_matched_count or 0)
-            match_cache: dict[str, tuple[Optional[list[int]], list[MatchResult], Optional[int], int]] = {
-                "": (initial_matched_indices, initial_results, initial_matched_count, initial_total_count)
+            match_cache: dict[str, tuple[Optional[array], list[MatchResult], Optional[int], int]] = {
+                "": (
+                    array("I", initial_matched_indices) if initial_matched_indices is not None else None,
+                    initial_results,
+                    initial_matched_count,
+                    initial_total_count,
+                )
             }
             cache_order: list[str] = [""]
             cache_limit = 128
@@ -922,7 +928,7 @@ def run(
             last_left_click_col = -1
             left_click_count = 0
             last_drawn_panel_rows = panel_rows
-            search_requests: queue.Queue[Optional[tuple[str, Optional[list[int]], str]]] = queue.Queue()
+            search_requests: queue.Queue[Optional[tuple[str, Optional[array], str]]] = queue.Queue()
             search_updates: queue.Queue[
                 tuple[str, Optional[list[int]], list[MatchResult], Optional[int], int, bool]
             ] = queue.Queue()
@@ -932,7 +938,7 @@ def run(
             runtime_completion_cache: dict[tuple[str, int], list[MatchResult]] = {}
             render_line_cache: dict[tuple[object, ...], str] = {}
 
-            def search_candidates_for(query_text: str) -> Optional[list[int]]:
+            def search_candidates_for(query_text: str) -> Optional[array]:
                 if history_client is not None:
                     prefix = query_text[:-1]
                     while prefix:
@@ -953,7 +959,7 @@ def run(
 
             def run_search_request(
                 query_text: str,
-                candidate_indices: Optional[list[int]],
+                candidate_indices: Optional[array],
                 cwd_text: str,
             ) -> tuple[Optional[list[int]], list[MatchResult], Optional[int], int, bool]:
                 search_error = False
@@ -1262,7 +1268,7 @@ def run(
 
             def cache_put(
                 key: str,
-                indices: Optional[list[int]],
+                indices: Optional[list[int] | array],
                 cached_results: list[MatchResult],
                 matched_count: Optional[int],
                 total_count: int,
@@ -1273,7 +1279,8 @@ def run(
                     oldest = cache_order.pop(0)
                     match_cache.pop(oldest, None)
                 cache_order.append(key)
-                match_cache[key] = (indices, cached_results, matched_count, total_count)
+                packed_indices = array("I", indices) if indices is not None else None
+                match_cache[key] = (packed_indices, cached_results, matched_count, total_count)
 
             try:
                 skip_previous_cursor_clear = False
@@ -1327,7 +1334,14 @@ def run(
                                         cwd=current_cwd_path,
                                     )
                                     initial_total_count = max(len(initial_results), len(all_indices))
-                                    match_cache = {"": (all_indices, initial_results, len(all_indices), initial_total_count)}
+                                    match_cache = {
+                                        "": (
+                                            array("I", all_indices),
+                                            initial_results,
+                                            len(all_indices),
+                                            initial_total_count,
+                                        )
+                                    }
                                     cache_order = [""]
                                     displayed_matched_indices = all_indices
                                     displayed_results = initial_results

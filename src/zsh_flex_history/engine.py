@@ -1556,7 +1556,7 @@ class HistoryDaemonClient:
     ) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
         payload: dict[str, Any] = {"action": "search_history", "query": query}
         if candidate_indices is not None and len(candidate_indices) <= 10_000:
-            payload["candidate_indices"] = candidate_indices
+            payload["candidate_indices"] = list(candidate_indices)
         if limit is not None:
             payload["limit"] = limit
         if cwd:
