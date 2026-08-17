@@ -751,11 +751,9 @@ def move_word_right(query: str, cursor_pos: int) -> int:
 
 
 def run(
-    history: list[HistoryEntry],
     *,
     inline_with_prompt: bool = False,
-    history_updates: Optional[queue.Queue[tuple[str, object]]] = None,
-    history_client: Optional[HistoryDaemonClient] = None,
+    history_client: HistoryDaemonClient,
     empty_space_command: Optional[str] = None,
 ) -> Optional[tuple[str, bool]]:
     global VISUAL_CURSOR_BG
@@ -867,41 +865,24 @@ def run(
             query_rows_used = 1
             results_visible = max(1, panel_rows - 1)
             render_width = 1
-            all_indices: Sequence[int] = range(0)
-            native_history_candidates = build_native_history_candidates(history)
             initial_matched_indices: Optional[list[int]] = None
             initial_matched_count: Optional[int] = None
-            if history_client is not None:
-                loaded = history_client.search_history(
-                    "",
-                    limit=MAX_RETURNED_RESULTS,
-                    cwd=current_cwd_text,
-                )
-                if loaded is None:
-                    initial_results = []
-                    history_load_error = True
-                else:
-                    history_matches, initial_matched_indices, initial_matched_count = loaded
-                    initial_results = apply_prefix_priority(
-                        "",
-                        history_matches,
-                        limit=MAX_RETURNED_RESULTS,
-                        current_cwd=current_cwd_text or None,
-                    )
-                    history_load_error = False
+            loaded = history_client.search_history(
+                "",
+                limit=MAX_RETURNED_RESULTS,
+                cwd=current_cwd_text,
+            )
+            if loaded is None:
+                initial_results = []
+                history_load_error = True
             else:
-                all_indices = range(len(history))
-                initial_results, _ = search(
+                history_matches, initial_matched_indices, initial_matched_count = loaded
+                initial_results = apply_prefix_priority(
                     "",
-                    history,
-                    cursor_pos=cursor_pos,
-                    candidate_indices=all_indices,
+                    history_matches,
                     limit=MAX_RETURNED_RESULTS,
-                    cwd=current_cwd_path,
-                    native_candidates=native_history_candidates,
+                    current_cwd=current_cwd_text or None,
                 )
-                initial_matched_indices = all_indices
-                initial_matched_count = len(all_indices)
                 history_load_error = False
             last_query = ""
             last_matched_indices = initial_matched_indices
@@ -916,7 +897,6 @@ def run(
             }
             cache_order: list[str] = [""]
             cache_limit = 128
-            history_loading = history_updates is not None and history_client is None
             displayed_results = initial_results
             displayed_matched_indices = initial_matched_indices
             displayed_matched_count = initial_matched_count
@@ -941,23 +921,13 @@ def run(
             render_line_cache: dict[tuple[object, ...], str] = {}
 
             def search_candidates_for(query_text: str) -> Optional[Sequence[int]]:
-                if history_client is not None:
-                    prefix = query_text[:-1]
-                    while prefix:
-                        cached = match_cache.get(prefix)
-                        if cached is not None and cached[0] is not None:
-                            return cached[0]
-                        prefix = prefix[:-1]
-                    return None
-                candidate_indices = all_indices
                 prefix = query_text[:-1]
                 while prefix:
                     cached = match_cache.get(prefix)
                     if cached is not None and cached[0] is not None:
-                        candidate_indices = cached[0]
-                        break
+                        return cached[0]
                     prefix = prefix[:-1]
-                return candidate_indices
+                return None
 
             def run_search_request(
                 query_text: str,
@@ -965,37 +935,25 @@ def run(
                 cwd_text: str,
             ) -> tuple[Optional[list[int]], list[MatchResult], Optional[int], int, bool]:
                 search_error = False
-                if history_client is not None:
-                    remote = history_client.search_history(
-                        query_text,
-                        candidate_indices=candidate_indices,
-                        limit=MAX_RETURNED_RESULTS,
-                        cwd=cwd_text,
-                    )
-                    if remote is None:
-                        history_results = []
-                        matched_indices = None
-                        matched_count = None
-                        search_error = True
-                    else:
-                        history_results, matched_indices, matched_count = remote
-                    resolved_results = apply_prefix_priority(
-                        query_text,
-                        history_results,
-                        limit=MAX_RETURNED_RESULTS,
-                        current_cwd=current_cwd_text or None,
-                    )
+                remote = history_client.search_history(
+                    query_text,
+                    candidate_indices=candidate_indices,
+                    limit=MAX_RETURNED_RESULTS,
+                    cwd=cwd_text,
+                )
+                if remote is None:
+                    history_results = []
+                    matched_indices = None
+                    matched_count = None
+                    search_error = True
                 else:
-                    resolved_results, matched_indices = search(
-                        query_text,
-                        history,
-                        cursor_pos=len(query_text),
-                        candidate_indices=candidate_indices,
-                        limit=MAX_RETURNED_RESULTS,
-                        cwd=current_cwd_path,
-                        native_candidates=native_history_candidates,
-                    )
-                    matched_count = len(matched_indices) if matched_indices is not None else None
+                    history_results, matched_indices, matched_count = remote
+                resolved_results = apply_prefix_priority(
+                    query_text,
+                    history_results,
+                    limit=MAX_RETURNED_RESULTS,
+                    current_cwd=current_cwd_text or None,
+                )
                 total_count = max(len(resolved_results), matched_count or 0)
                 return matched_indices, resolved_results, matched_count, total_count, search_error
 
@@ -1315,48 +1273,6 @@ def run(
                             displayed_matched_count = result_count
                             displayed_total_count = result_total
 
-                    if history_updates is not None and history_client is None:
-                        while True:
-                            try:
-                                kind, payload = history_updates.get_nowait()
-                            except queue.Empty:
-                                break
-                            if kind == "loaded":
-                                loaded_history = payload
-                                if isinstance(loaded_history, list):
-                                    history = loaded_history
-                                    all_indices = range(len(history))
-                                    native_history_candidates = build_native_history_candidates(history)
-                                    last_query = ""
-                                    last_matched_indices = all_indices
-                                    initial_results, _ = search(
-                                        "",
-                                        history,
-                                        cursor_pos=cursor_pos,
-                                        candidate_indices=all_indices,
-                                        limit=MAX_RETURNED_RESULTS,
-                                        cwd=current_cwd_path,
-                                        native_candidates=native_history_candidates,
-                                    )
-                                    initial_total_count = max(len(initial_results), len(all_indices))
-                                    match_cache = {
-                                        "": (
-                                            array("I", all_indices),
-                                            initial_results,
-                                            len(all_indices),
-                                            initial_total_count,
-                                        )
-                                    }
-                                    cache_order = [""]
-                                    displayed_matched_indices = all_indices
-                                    displayed_results = initial_results
-                                    displayed_matched_count = len(all_indices)
-                                    displayed_total_count = initial_total_count
-                                history_loading = False
-                            elif kind == "error":
-                                history_loading = False
-                                history_load_error = True
-
                     pending_event: Optional[tuple[str, object]] = None
                     term_size = tty_terminal_size(fd)
                     width = term_size.columns
@@ -1442,13 +1358,11 @@ def run(
                     last_matched_indices = matched_indices
                     status_message = ""
                     debug_note = ""
-                    if history_client is not None and history_client.debug:
+                    if history_client.debug:
                         count_text = "?" if matched_count is None else str(matched_count)
                         indices_text = "no-idx" if matched_indices is None else "idx"
                         debug_note = f"matches={count_text} {indices_text}"
-                    if history_loading and not results:
-                        status_message = "loading history..."
-                    elif history_load_error and not results:
+                    if history_load_error and not results:
                         status_message = "history load failed"
                     if selected >= len(results):
                         selected = max(0, len(results) - 1)
@@ -1487,7 +1401,7 @@ def run(
 
                     if pending_event is None:
                         input_timeout: Optional[float] = 0.03
-                        if not history_loading and queued_search_key is None:
+                        if queued_search_key is None:
                             input_timeout = None
                         ev, payload = read_key(fd, timeout=input_timeout)
                     else:
@@ -1825,11 +1739,6 @@ def main() -> int:
         help="Maximum SQLite history rows to load on initial custom-history startup (for example: 10000 or 10k).",
     )
     parser.add_argument(
-        "--no-shared-daemon",
-        action="store_true",
-        help="Error out because local fallback mode is disabled.",
-    )
-    parser.add_argument(
         "--debug-daemon",
         action="store_true",
         help="Print daemon connection/startup diagnostics to stderr.",
@@ -1906,34 +1815,24 @@ def main() -> int:
             use_custom_history=args.use_custom_history,
         )
 
-    history_client: Optional[HistoryDaemonClient] = None
-    history_updates: Optional[queue.Queue[tuple[str, object]]] = None
-    if not args.no_shared_daemon:
-        daemon_client = HistoryDaemonClient(
-            socket_path,
-            history_path,
-            Path(__file__).resolve(),
-            debug=args.debug_daemon,
-            history_length=history_length,
-            use_custom_history=args.use_custom_history,
-        )
-        if daemon_client.ensure_running():
-            history_client = daemon_client
-            daemon_debug_log(args.debug_daemon, "shared daemon mode enabled")
-        else:
-            print("zsh_flex_history: daemon unavailable (no local fallback enabled)", file=sys.stderr)
-            return 1
-    else:
-        print("zsh_flex_history: --no-shared-daemon is not supported (no local fallback enabled)", file=sys.stderr)
+    history_client = HistoryDaemonClient(
+        socket_path,
+        history_path,
+        Path(__file__).resolve(),
+        debug=args.debug_daemon,
+        history_length=history_length,
+        use_custom_history=args.use_custom_history,
+    )
+    if not history_client.ensure_running():
+        print("zsh_flex_history: daemon unavailable", file=sys.stderr)
         return 1
+    daemon_debug_log(args.debug_daemon, "shared daemon mode enabled")
 
     empty_space_command = os.environ.get("ZSH_FLEX_HISTORY_EMPTY_SPACE_COMMAND")
     if empty_space_command is not None and not empty_space_command.strip():
         empty_space_command = None
     selection = run(
-        [],
         inline_with_prompt=args.print_only,
-        history_updates=history_updates,
         history_client=history_client,
         empty_space_command=empty_space_command,
     )
