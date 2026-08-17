@@ -25,7 +25,7 @@ import unicodedata
 from argparse import SUPPRESS, ArgumentParser
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 from .syntax_highlighting import IncrementalHighlighter, ansi_for_token, highlight_tokens
 
@@ -867,7 +867,7 @@ def run(
             query_rows_used = 1
             results_visible = max(1, panel_rows - 1)
             render_width = 1
-            all_indices: list[int] = []
+            all_indices: Sequence[int] = range(0)
             initial_matched_indices: Optional[list[int]] = None
             initial_matched_count: Optional[int] = None
             if history_client is not None:
@@ -889,7 +889,7 @@ def run(
                     )
                     history_load_error = False
             else:
-                all_indices = list(range(len(history)))
+                all_indices = range(len(history))
                 initial_results, _ = search(
                     "",
                     history,
@@ -928,7 +928,7 @@ def run(
             last_left_click_col = -1
             left_click_count = 0
             last_drawn_panel_rows = panel_rows
-            search_requests: queue.Queue[Optional[tuple[str, Optional[array], str]]] = queue.Queue()
+            search_requests: queue.Queue[Optional[tuple[str, Optional[Sequence[int]], str]]] = queue.Queue()
             search_updates: queue.Queue[
                 tuple[str, Optional[list[int]], list[MatchResult], Optional[int], int, bool]
             ] = queue.Queue()
@@ -938,7 +938,7 @@ def run(
             runtime_completion_cache: dict[tuple[str, int], list[MatchResult]] = {}
             render_line_cache: dict[tuple[object, ...], str] = {}
 
-            def search_candidates_for(query_text: str) -> Optional[array]:
+            def search_candidates_for(query_text: str) -> Optional[Sequence[int]]:
                 if history_client is not None:
                     prefix = query_text[:-1]
                     while prefix:
@@ -959,7 +959,7 @@ def run(
 
             def run_search_request(
                 query_text: str,
-                candidate_indices: Optional[array],
+                candidate_indices: Optional[Sequence[int]],
                 cwd_text: str,
             ) -> tuple[Optional[list[int]], list[MatchResult], Optional[int], int, bool]:
                 search_error = False
@@ -1322,7 +1322,7 @@ def run(
                                 loaded_history = payload
                                 if isinstance(loaded_history, list):
                                     history = loaded_history
-                                    all_indices = list(range(len(history)))
+                                    all_indices = range(len(history))
                                     last_query = ""
                                     last_matched_indices = all_indices
                                     initial_results, _ = search(

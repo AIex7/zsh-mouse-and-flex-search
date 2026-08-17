@@ -22,7 +22,7 @@ import unicodedata
 from argparse import SUPPRESS, ArgumentParser
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
 ANSI_COLOR_NAMES = {
     "black": 0,
@@ -1158,10 +1158,10 @@ def search_history_only(
     query: str,
     history: list[HistoryEntry],
     *,
-    candidate_indices: Optional[list[int]] = None,
+    candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
 ) -> tuple[list[MatchResult], list[int]]:
-    candidates: range | list[int]
+    candidates: range | Sequence[int]
     if candidate_indices is None:
         candidates = range(len(history))
     else:
@@ -1332,7 +1332,7 @@ def search(
     history: list[HistoryEntry],
     *,
     cursor_pos: int = 0,
-    candidate_indices: Optional[list[int]] = None,
+    candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     cwd: Optional[Path] = None,
 ) -> tuple[list[MatchResult], list[int]]:
@@ -1550,7 +1550,7 @@ class HistoryDaemonClient:
         self,
         query: str,
         *,
-        candidate_indices: Optional[list[int]] = None,
+        candidate_indices: Optional[Sequence[int]] = None,
         limit: Optional[int] = None,
         cwd: Optional[str] = None,
     ) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
