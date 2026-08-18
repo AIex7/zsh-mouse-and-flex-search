@@ -14,20 +14,10 @@ uv tool install git+https://github.com/uAIex/zsh-mouse-and-flex-search
 printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
-Normal installs use optimized Rust, and this project also configures editable
-installs to use the release profile. To rebuild manually, run:
+This project uses python with rust extensions for enhanced speed. To rebuild manually, run:
 
 ```bash
 uv run --with maturin maturin develop --release
-```
-
-Or install from a local checkout:
-
-```bash
-git clone https://github.com/uAIex/zsh-mouse-and-flex-search
-cd zsh-mouse-and-flex-search
-uv tool install .
-printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
 Optionally, to import your existing Zsh history into the custom SQLite history database, run:
