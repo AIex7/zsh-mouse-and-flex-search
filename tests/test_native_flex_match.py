@@ -1,4 +1,4 @@
-"""Equivalence checks for the optional native flex matcher."""
+"""Equivalence checks for the required native flex matcher."""
 
 from __future__ import annotations
 
@@ -12,16 +12,66 @@ from array import array
 from pathlib import Path
 from unittest.mock import patch
 
+from zsh_flex_history import _flex_match as native
 from zsh_flex_history import engine
 
 
-class NativeFlexMatchTests(unittest.TestCase):
-    def setUp(self) -> None:
-        if engine._native_flex_match is None:
-            self.skipTest("native flex extension has not been built")
+def python_flex_match(
+    query: str,
+    candidate: str,
+    *,
+    candidate_lower: str | None = None,
+) -> engine.MatchResult | None:
+    """Independent test reference for the native scoring contract."""
+    q = "".join(character for character in query.lower() if not character.isspace())
+    c = candidate_lower if candidate_lower is not None else candidate.lower()
+    if not q:
+        return engine.MatchResult(candidate, 0, text_lower=c)
 
+    at = 0
+    first = previous = contiguous = gap_penalty = boundary_bonus = 0
+    for index, character in enumerate(q):
+        position = c.find(character, at)
+        if position == -1:
+            return None
+        if index == 0:
+            first = position
+            if position == 0:
+                boundary_bonus += 12
+            elif candidate[position - 1] in " _-/.:":
+                boundary_bonus += 8
+        else:
+            gap = position - previous - 1
+            gap_penalty += gap * 2
+            if gap == 0:
+                contiguous += 10
+            if candidate[position - 1] in " _-/.:":
+                boundary_bonus += 6
+        previous = position
+        at = position + 1
+
+    span = previous - first + 1
+    score = contiguous + boundary_bonus + max(0, 30 - first)
+    score += max(0, 20 - (span - len(q)))
+    score -= gap_penalty + len(candidate) // 8
+    return engine.MatchResult(candidate, score, text_lower=c)
+
+
+def match_result_payload(item: engine.MatchResult) -> dict[str, object]:
+    return {
+        "text": item.text,
+        "score": item.score,
+        "exact": item.exact,
+        "recency": item.recency,
+        "cwd": item.cwd,
+        "failed": item.failed,
+        "words": list(item.words),
+    }
+
+
+class NativeFlexMatchTests(unittest.TestCase):
     def assert_matches_python(self, query: str, candidate: str) -> None:
-        expected = engine._python_flex_match(query, candidate)
+        expected = python_flex_match(query, candidate)
         actual = engine.flex_match(query, candidate)
         if expected is None:
             self.assertIsNone(actual, (query, candidate))
@@ -90,7 +140,7 @@ class NativeFlexMatchTests(unittest.TestCase):
                 query,
             )
 
-    def test_full_ordered_search_matches_python_fallback(self) -> None:
+    def test_full_ordered_batch_search_matches_scalar_native_pipeline(self) -> None:
         history = [
             engine.make_history_entry("git status --short", cwd="/repo"),
             engine.make_history_entry("git switch main", cwd="/other"),
@@ -113,7 +163,7 @@ class NativeFlexMatchTests(unittest.TestCase):
             ("écl", [0, 4, 6]),
             ("does-not-exist", None),
         ):
-            with patch.object(engine, "_native_flex_match", None):
+            with patch.object(engine, "flex_match", python_flex_match):
                 expected_results, expected_indices = engine.search(
                     query,
                     history,
@@ -156,7 +206,7 @@ class NativeFlexMatchTests(unittest.TestCase):
             ("écl", [0, 3, 6]),
             ("does-not-exist", None),
         ):
-            with patch.object(engine, "_native_flex_match", None):
+            with patch.object(engine, "flex_match", python_flex_match):
                 expected_results, expected_indices = engine.search(
                     query,
                     history,
@@ -172,10 +222,12 @@ class NativeFlexMatchTests(unittest.TestCase):
                 limit=4,
                 current_cwd="/repo",
             )
-            self.assertIsNotNone(actual)
-            assert actual is not None
             actual_results, actual_indices, actual_count = actual
-            expected_payload = engine.daemon_matched_indices_payload(query, expected_indices)
+            expected_payload = (
+                expected_indices
+                if query and len(expected_indices) <= engine.MAX_CACHED_CANDIDATE_INDICES
+                else None
+            )
             self.assertEqual(actual_indices, expected_payload, query)
             self.assertEqual(actual_count, len(expected_indices), query)
             self.assertEqual(actual_results, expected_results, query)
@@ -198,14 +250,12 @@ class NativeFlexMatchTests(unittest.TestCase):
                 limit=4,
                 current_cwd="/repo",
             )
-            self.assertIsNotNone(serialized)
-            assert serialized is not None
             self.assertEqual(
                 json.loads(serialized),
                 {
                     "ok": True,
                     "history_results": [
-                        engine.match_result_to_payload(item) for item in expected_results
+                        match_result_payload(item) for item in expected_results
                     ],
                     "matched_indices": expected_payload,
                     "matched_indices_omitted": expected_payload is None,
@@ -213,8 +263,7 @@ class NativeFlexMatchTests(unittest.TestCase):
                 },
                 query,
             )
-            self.assertIsNotNone(engine._native_parse_search_response)
-            parsed_response = engine._native_parse_search_response(serialized.encode("utf-8"))
+            parsed_response = native.parse_search_response(serialized.encode("utf-8"))
             self.assertIsNotNone(parsed_response)
             assert parsed_response is not None
             parsed_results, parsed_indices, parsed_count = parsed_response
@@ -237,12 +286,11 @@ class NativeFlexMatchTests(unittest.TestCase):
                 query,
             )
 
-        self.assertIsNone(engine._native_parse_search_response(b"not json"))
-        self.assertIsNone(engine._native_parse_search_response(b'{"ok":false}'))
+        self.assertIsNone(native.parse_search_response(b"not json"))
+        self.assertIsNone(native.parse_search_response(b'{"ok":false}'))
 
     def test_native_search_request_serialization(self) -> None:
-        self.assertIsNotNone(engine._native_serialize_search_request)
-        serialized = engine._native_serialize_search_request(
+        serialized = native.serialize_search_request(
             "git st",
             array("I", [1, 3, 8]),
             100,
@@ -260,12 +308,11 @@ class NativeFlexMatchTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            json.loads(engine._native_serialize_search_request("x")),
+            json.loads(native.serialize_search_request("x")),
             {"action": "search_history", "query": "x"},
         )
 
     def test_native_daemon_round_trip(self) -> None:
-        self.assertIsNotNone(engine._native_search_daemon)
         response = {
             "ok": True,
             "history_results": [
@@ -378,7 +425,6 @@ class NativeFlexMatchTests(unittest.TestCase):
         )
 
     def test_native_daemon_server_dispatch(self) -> None:
-        self.assertIsNotNone(engine._NativeDaemonServer)
         response = {
             "ok": True,
             "history_results": [],

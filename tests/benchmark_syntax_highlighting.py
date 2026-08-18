@@ -9,8 +9,7 @@ The benchmark feeds complete editing timelines to fresh incremental highlighters
 character-by-character typing, unchanged-query redraws, backspaces, pasted text,
 and mid-line edits. Command lookup caches are warmed before timing. Rendering,
 terminal I/O, history searching, and benchmark-data construction are excluded.
-Every native timeline is checked against the original Python implementation
-before timing.
+Incremental timelines are checked against fresh native lexing before timing.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,19 +79,15 @@ SCENARIOS = {
 
 
 def verify_equivalence(states: list[str]) -> None:
-    original = syntax_highlighting.PythonIncrementalHighlighter()
-    native = syntax_highlighting.IncrementalHighlighter()
-    if native._native is None:
-        raise RuntimeError("native syntax highlighter is unavailable")
+    incremental = syntax_highlighting.IncrementalHighlighter()
     for query in states:
-        expected = original.highlight(query)
-        actual = token_names(native.highlight(query))
+        expected = token_names(syntax_highlighting.highlight_tokens(query))
+        actual = token_names(incremental.highlight(query))
         if actual != expected:
             raise AssertionError(f"native highlighting differs for {query!r}")
 
 
 def time_highlighter(
-    factory: Callable[[], object],
     states: list[str],
     repetitions: int,
 ) -> float:
@@ -102,7 +96,7 @@ def time_highlighter(
         started = time.perf_counter()
         checksum = 0
         for _ in range(repetitions):
-            highlighter = factory()
+            highlighter = syntax_highlighting.IncrementalHighlighter()
             for query in states:
                 checksum += len(highlighter.highlight(query))
         elapsed = time.perf_counter() - started
@@ -113,12 +107,8 @@ def time_highlighter(
 
 
 def main() -> int:
-    if syntax_highlighting._NativeIncrementalHighlighter is None:
-        print("Native syntax highlighter unavailable; rebuild with `uv run --reinstall-package zsh-flex-history ...`.")
-        return 1
-
     print("Syntax highlighting benchmark (median microseconds per UI highlight call)")
-    print("scenario             updates    Python us    Rust us    speedup")
+    print("scenario             updates      Rust us")
     for label, states in SCENARIOS.items():
         verify_equivalence(states)
         # Keep total processed characters similar across short and long scenarios.
@@ -126,26 +116,12 @@ def main() -> int:
         repetitions = max(1, min(50, 200_000 // total_characters))
 
         # Warm filesystem/PATH command-state caches outside the timed region.
-        warm_python = syntax_highlighting.PythonIncrementalHighlighter()
         warm_native = syntax_highlighting.IncrementalHighlighter()
         for query in states:
-            warm_python.highlight(query)
             warm_native.highlight(query)
 
-        python_us = time_highlighter(
-            syntax_highlighting.PythonIncrementalHighlighter,
-            states,
-            repetitions,
-        )
-        rust_us = time_highlighter(
-            syntax_highlighting.IncrementalHighlighter,
-            states,
-            repetitions,
-        )
-        print(
-            f"{label:<20} {len(states):>7,} {python_us:>12.2f} "
-            f"{rust_us:>10.2f} {python_us / rust_us:>9.2f}x"
-        )
+        rust_us = time_highlighter(states, repetitions)
+        print(f"{label:<20} {len(states):>7,} {rust_us:>12.2f}")
     return 0
 
 

@@ -1,4 +1,4 @@
-"""Native syntax-highlighting equivalence and fallback tests."""
+"""Native syntax-highlighting tests."""
 
 from __future__ import annotations
 
@@ -34,10 +34,7 @@ class SyntaxHighlightingTests(unittest.TestCase):
                 syntax_highlighting.ansi_for_token(token_name),
             )
 
-    def test_randomized_incremental_edits_match_original_python(self) -> None:
-        if syntax_highlighting._NativeIncrementalHighlighter is None:
-            self.skipTest("native syntax highlighter has not been built")
-
+    def test_randomized_incremental_edits_match_fresh_native_lexing(self) -> None:
         def deterministic_command_state(word: str, word_complete: bool) -> str:
             if word.startswith(("a", "g")):
                 return "valid"
@@ -46,8 +43,7 @@ class SyntaxHighlightingTests(unittest.TestCase):
         rng = random.Random(20_260_818)
         alphabet = "abcgitXYZ09 _-=/$#\\'\"`(){}[];&|<>é"
         query = ""
-        native = syntax_highlighting.IncrementalHighlighter()
-        original = syntax_highlighting.PythonIncrementalHighlighter()
+        incremental = syntax_highlighting.IncrementalHighlighter()
         with patch.object(
             syntax_highlighting,
             "_command_state",
@@ -65,14 +61,12 @@ class SyntaxHighlightingTests(unittest.TestCase):
                     position = rng.randrange(len(query))
                     query = query[:position] + rng.choice(alphabet) + query[position + 1 :]
                 self.assertEqual(
-                    token_names(native.highlight(query)),
-                    original.highlight(query),
+                    token_names(incremental.highlight(query)),
+                    token_names(syntax_highlighting.highlight_tokens(query)),
                     query,
                 )
 
-    def test_native_incremental_matches_original_python(self) -> None:
-        if syntax_highlighting._NativeIncrementalHighlighter is None:
-            self.skipTest("native syntax highlighter has not been built")
+    def test_native_incremental_matches_fresh_native_lexing(self) -> None:
         commands = (
             "git status --short",
             "FOO=bar python -m pytest -q",
@@ -81,20 +75,16 @@ class SyntaxHighlightingTests(unittest.TestCase):
             "value=$((1 + (2 * 3))) && deploy production --tag=éclair",
             "python -m worker.dispatch --payload '{\"key\": \"value\"}'",
         )
-        native = syntax_highlighting.IncrementalHighlighter()
-        original = syntax_highlighting.PythonIncrementalHighlighter()
-        self.assertIsNotNone(native._native)
+        incremental = syntax_highlighting.IncrementalHighlighter()
         for command in commands:
             for query in editing_sequence(command):
                 self.assertEqual(
-                    token_names(native.highlight(query)),
-                    original.highlight(query),
+                    token_names(incremental.highlight(query)),
+                    token_names(syntax_highlighting.highlight_tokens(query)),
                     query,
                 )
 
-    def test_native_complete_highlight_matches_original_python(self) -> None:
-        if syntax_highlighting._NativeIncrementalHighlighter is None:
-            self.skipTest("native syntax highlighter has not been built")
+    def test_native_complete_highlight_returns_one_token_per_character(self) -> None:
         for query in (
             "",
             "git",
@@ -104,21 +94,10 @@ class SyntaxHighlightingTests(unittest.TestCase):
             "command one && command two || command three",
             "écho café",
         ):
-            self.assertEqual(
-                token_names(syntax_highlighting.highlight_tokens(query)),
-                syntax_highlighting.python_highlight_tokens(query),
-                query,
-            )
-
-    def test_original_python_fallback(self) -> None:
-        with patch.object(syntax_highlighting, "_NativeIncrementalHighlighter", None):
-            highlighter = syntax_highlighting.IncrementalHighlighter()
-            self.assertIsNone(highlighter._native)
-            query = "git status --short"
-            self.assertEqual(
-                highlighter.highlight(query),
-                syntax_highlighting.PythonIncrementalHighlighter().highlight(query),
-            )
+            tokens = syntax_highlighting.highlight_tokens(query)
+            self.assertIsInstance(tokens, bytes)
+            self.assertEqual(len(tokens), len(query))
+            self.assertTrue(all(token < len(syntax_highlighting.TOKEN_NAMES) for token in tokens))
 
 
 if __name__ == "__main__":

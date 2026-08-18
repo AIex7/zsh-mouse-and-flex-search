@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import json
-import queue
 import re
 import select
 import shlex
@@ -18,26 +17,14 @@ import time
 import tempfile
 import tty
 from datetime import datetime, timezone
-import unicodedata
-from argparse import SUPPRESS, ArgumentParser
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-try:
-    from ._flex_match import NativeDaemonServer as _NativeDaemonServer
-    from ._flex_match import NativeHistory as _NativeHistory
-    from ._flex_match import flex_match as _native_flex_match
-    from ._flex_match import parse_search_response as _native_parse_search_response
-    from ._flex_match import search_daemon as _native_search_daemon
-    from ._flex_match import serialize_search_request as _native_serialize_search_request
-except ImportError:
-    _NativeDaemonServer = None
-    _NativeHistory = None
-    _native_flex_match = None
-    _native_parse_search_response = None
-    _native_search_daemon = None
-    _native_serialize_search_request = None
+from ._flex_match import NativeDaemonServer as _NativeDaemonServer
+from ._flex_match import NativeHistory as _NativeHistory
+from ._flex_match import flex_match as _native_flex_match
+from ._flex_match import search_daemon as _native_search_daemon
 
 ANSI_COLOR_NAMES = {
     "black": 0,
@@ -609,74 +596,22 @@ def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list
     return custom_history_entries_from_rows(rows)
 
 
-def load_custom_history_update(
-    path: Path,
-    *,
-    existing_history: Optional[list[HistoryEntry]] = None,
-    limit: Optional[int] = None,
-) -> tuple[list[HistoryEntry], Optional[list[HistoryEntry]]]:
-    """Load custom history and identify a safe incremental prepend when possible.
-
-    The second tuple member is ``None`` when native consumers must rebuild,
-    otherwise it contains only the new newest-first entries.
-    """
-    if not existing_history:
-        return load_custom_history_rows(path, limit=limit), None
-
-    recent_entries = load_custom_history_rows(path, limit=10)
-    if not recent_entries:
-        return [], None
-
-    existing_keys = {
-        (entry.timestamp, entry.text, entry.cwd, entry.failed)
-        for entry in existing_history
-        if entry.timestamp is not None
-    }
-    overlap_at: Optional[int] = None
-    for idx, entry in enumerate(recent_entries):
-        if (entry.timestamp, entry.text, entry.cwd, entry.failed) in existing_keys:
-            overlap_at = idx
-            break
-
-    if overlap_at is None:
-        return load_custom_history_rows(path), None
-
-    newer_entries = [
-        entry
-        for entry in recent_entries[:overlap_at]
-        if (entry.timestamp, entry.text, entry.cwd, entry.failed) not in existing_keys
-    ]
-    if not newer_entries:
-        return existing_history, []
-
-    replaced_pairs = {(entry.text, entry.cwd) for entry in newer_entries}
-    merged_history = [entry for entry in existing_history if (entry.text, entry.cwd) not in replaced_pairs]
-    return newer_entries + merged_history, newer_entries
-
-
 def load_custom_history(
     path: Path,
     *,
-    existing_history: Optional[list[HistoryEntry]] = None,
     limit: Optional[int] = None,
 ) -> list[HistoryEntry]:
-    history, _ = load_custom_history_update(
-        path,
-        existing_history=existing_history,
-        limit=limit,
-    )
-    return history
+    return load_custom_history_rows(path, limit=limit)
 
 
 def load_history_source(
     path: Path,
     *,
     use_custom_history: bool,
-    existing_history: Optional[list[HistoryEntry]] = None,
     history_length: Optional[int] = None,
 ) -> list[HistoryEntry]:
     if use_custom_history:
-        return load_custom_history(path, existing_history=existing_history, limit=history_length)
+        return load_custom_history(path, limit=history_length)
     return load_history(path)
 
 
@@ -782,13 +717,6 @@ def daemon_debug_log(enabled: bool, message: str) -> None:
         print(f"[zsh_flex_history daemon] {message}", file=sys.stderr)
 
 
-def daemon_matched_indices_payload(query: str, matched_indices: list[int]) -> Optional[list[int]]:
-    """Return only candidate indexes the client can reuse in its next request."""
-    if query and len(matched_indices) <= MAX_CACHED_CANDIDATE_INDICES:
-        return matched_indices
-    return None
-
-
 def query_equals_candidate(query: str, candidate: str) -> bool:
     normalized_query = query.strip().lower()
     return bool(normalized_query) and candidate.strip().lower() == normalized_query
@@ -800,58 +728,13 @@ def filter_exact_query_match(query: str, results: list[MatchResult]) -> list[Mat
     return [item for item in results if not query_equals_candidate(query, item.text)]
 
 
-def _python_flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
-    if not query:
-        return MatchResult(candidate, 0, text_lower=candidate_lower or candidate.lower())
-
-    q = "".join(ch for ch in query.lower() if not ch.isspace())
-    c = candidate_lower if candidate_lower is not None else candidate.lower()
-    if not q:
-        return MatchResult(candidate, 0, text_lower=c)
-
-    at = 0
-    first = 0
-    previous = 0
-    contiguous = 0
-    gap_penalty = 0
-    boundary_bonus = 0
-    for i, ch in enumerate(q):
-        pos = c.find(ch, at)
-        if pos == -1:
-            return None
-        if i == 0:
-            first = pos
-            if pos == 0:
-                boundary_bonus += 12
-            elif pos > 0 and candidate[pos - 1] in " _-/.:":
-                boundary_bonus += 8
-        else:
-            gap = pos - previous - 1
-            gap_penalty += gap * 2
-            if gap == 0:
-                contiguous += 10
-            if candidate[pos - 1] in " _-/.:":
-                boundary_bonus += 6
-        previous = pos
-        at = pos + 1
-
-    span = previous - first + 1
-    start_bonus = max(0, 30 - first)
-    compact_bonus = max(0, 20 - (span - len(q)))
-    score = contiguous + boundary_bonus + start_bonus + compact_bonus
-    score -= gap_penalty + len(candidate) // 8
-    return MatchResult(candidate, score, text_lower=c)
-
-
 def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
-    """Use the native matcher when installed, with an exact Python fallback."""
+    """Match with the required native extension."""
     c = candidate_lower or candidate.lower()
-    if _native_flex_match is not None:
-        matched = _native_flex_match(query.lower(), candidate, c)
-        if matched is None:
-            return None
-        return MatchResult(candidate, matched, text_lower=c)
-    return _python_flex_match(query, candidate, candidate_lower=c)
+    matched = _native_flex_match(query.lower(), candidate, c)
+    if matched is None:
+        return None
+    return MatchResult(candidate, matched, text_lower=c)
 
 
 def token_bounds(query: str, cursor_pos: int) -> tuple[int, int]:
@@ -1214,10 +1097,8 @@ def native_history_candidate_inputs(history: Sequence[HistoryEntry]) -> list[tup
     ]
 
 
-def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional[Any]:
+def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Any:
     """Copy searchable history text into a Rust-owned cache once per load."""
-    if _NativeHistory is None:
-        return None
     return _NativeHistory(native_history_candidate_inputs(history))
 
 
@@ -1226,15 +1107,9 @@ def build_native_custom_history_candidates(
     *,
     limit: Optional[int] = None,
     batch_size: int = 1_000,
-) -> tuple[Optional[Any], list[HistoryEntry]]:
+) -> tuple[Any, list[HistoryEntry]]:
     """Stream SQLite history into Rust without retaining a full Python copy."""
-    if _NativeHistory is None:
-        return None, []
     native_candidates = _NativeHistory([])
-    extend = getattr(native_candidates, "extend", None)
-    if extend is None:
-        history = load_custom_history_rows(path, limit=limit)
-        return build_native_history_candidates(history), history[:10]
     if not path.exists():
         return native_candidates, []
 
@@ -1254,7 +1129,7 @@ def build_native_custom_history_candidates(
                 entries = custom_history_entries_from_rows(rows)
                 if len(recent_entries) < 10:
                     recent_entries.extend(entries[: 10 - len(recent_entries)])
-                extend(native_history_candidate_inputs(entries))
+                native_candidates.extend(native_history_candidate_inputs(entries))
     except (OSError, sqlite3.Error):
         return _NativeHistory([]), []
     return native_candidates, recent_entries
@@ -1262,20 +1137,15 @@ def build_native_custom_history_candidates(
 
 def native_history_response_json(
     query: str,
-    native_candidates: Optional[Any],
+    native_candidates: Any,
     *,
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     current_cwd: Optional[str] = None,
-) -> Optional[str]:
+) -> str:
     """Serialize a complete search response without a Python history list."""
-    if native_candidates is None:
-        return None
-    serializer = getattr(native_candidates, "search_response_json", None)
-    if serializer is None:
-        return None
     result_limit = limit if (limit is None or limit > 0) else None
-    return serializer(
+    return native_candidates.search_response_json(
         query.lower(),
         query.strip().lower(),
         shell_words_for_matching(query),
@@ -1296,8 +1166,7 @@ class DaemonHistoryState:
     path: Path
     use_custom_history: bool
     history_length: Optional[int]
-    python_history: Optional[list[HistoryEntry]]
-    native_candidates: Optional[Any]
+    native_candidates: Any
     recent_entries: list[HistoryEntry]
 
     @classmethod
@@ -1308,20 +1177,12 @@ class DaemonHistoryState:
         use_custom_history: bool,
         history_length: Optional[int],
     ) -> "DaemonHistoryState":
-        if _NativeHistory is not None and use_custom_history:
+        if use_custom_history:
             native_candidates, recent_entries = build_native_custom_history_candidates(
                 path,
                 limit=history_length,
             )
-            if native_candidates is not None:
-                return cls(
-                    path,
-                    use_custom_history,
-                    history_length,
-                    None,
-                    native_candidates,
-                    recent_entries,
-                )
+            return cls(path, use_custom_history, history_length, native_candidates, recent_entries)
 
         history = load_history_source(
             path,
@@ -1329,61 +1190,32 @@ class DaemonHistoryState:
             history_length=history_length if use_custom_history else None,
         )
         native_candidates = build_native_history_candidates(history)
-        if native_candidates is not None:
-            return cls(
-                path,
-                use_custom_history,
-                history_length,
-                None,
-                native_candidates,
-                history[:10] if use_custom_history else [],
-            )
-        return cls(path, use_custom_history, history_length, history, None, [])
+        return cls(
+            path,
+            use_custom_history,
+            history_length,
+            native_candidates,
+            history[:10] if use_custom_history else [],
+        )
 
     def __len__(self) -> int:
-        if self.native_candidates is not None:
-            return len(self.native_candidates)
-        return len(self.python_history or ())
+        return len(self.native_candidates)
 
     def _rebuild_native(self) -> None:
-        if self.use_custom_history and _NativeHistory is not None:
+        if self.use_custom_history:
             native_candidates, recent_entries = build_native_custom_history_candidates(self.path)
-            if native_candidates is not None:
-                self.python_history = None
-                self.native_candidates = native_candidates
-                self.recent_entries = recent_entries
-                return
+            self.native_candidates = native_candidates
+            self.recent_entries = recent_entries
+            return
 
         history = load_history_source(
             self.path,
             use_custom_history=self.use_custom_history,
         )
-        native_candidates = build_native_history_candidates(history)
-        if native_candidates is not None:
-            self.python_history = None
-            self.native_candidates = native_candidates
-            self.recent_entries = history[:10] if self.use_custom_history else []
-        else:
-            self.python_history = history
-            self.native_candidates = None
-            self.recent_entries = []
+        self.native_candidates = build_native_history_candidates(history)
+        self.recent_entries = []
 
     def refresh(self) -> None:
-        if self.native_candidates is None:
-            history = self.python_history or []
-            refreshed, native_candidates = refresh_history_caches(
-                self.path,
-                use_custom_history=self.use_custom_history,
-                history=history,
-                native_candidates=None,
-            )
-            self.python_history = refreshed
-            self.native_candidates = native_candidates
-            if native_candidates is not None:
-                self.recent_entries = refreshed[:10]
-                self.python_history = None
-            return
-
         if not self.use_custom_history:
             self._rebuild_native()
             return
@@ -1412,15 +1244,9 @@ class DaemonHistoryState:
             if history_entry_refresh_key(entry) not in existing_keys
         ]
         if newer_entries:
-            prepend_replacing = getattr(self.native_candidates, "prepend_replacing", None)
-            if prepend_replacing is None:
-                self._rebuild_native()
-                return
-            try:
-                prepend_replacing(native_history_candidate_inputs(newer_entries))
-            except (RuntimeError, TypeError, ValueError):
-                self._rebuild_native()
-                return
+            self.native_candidates.prepend_replacing(
+                native_history_candidate_inputs(newer_entries)
+            )
         self.recent_entries = latest_entries
 
     def search_response(
@@ -1431,77 +1257,27 @@ class DaemonHistoryState:
         limit: Optional[int],
         current_cwd: Optional[str],
     ) -> str:
-        if self.native_candidates is not None:
-            try:
-                response = native_history_response_json(
-                    query,
-                    self.native_candidates,
-                    candidate_indices=candidate_indices,
-                    limit=limit,
-                    current_cwd=current_cwd,
-                )
-            except Exception:
-                response = None
-            if response is not None:
-                return response
-            self.python_history = load_history_source(
-                self.path,
-                use_custom_history=self.use_custom_history,
-            )
-            self.native_candidates = None
-            self.recent_entries = []
-
-        history = self.python_history or []
-        return daemon_search_response_serialized(
+        return native_history_response_json(
             query,
-            history,
-            None,
+            self.native_candidates,
             candidate_indices=candidate_indices,
             limit=limit,
             current_cwd=current_cwd,
         )
 
 
-def refresh_history_caches(
-    path: Path,
-    *,
-    use_custom_history: bool,
-    history: list[HistoryEntry],
-    native_candidates: Optional[Any],
-) -> tuple[list[HistoryEntry], Optional[Any]]:
-    """Refresh Python history and incrementally update Rust when overlap is known."""
-    if not use_custom_history:
-        refreshed = load_history(path)
-        return refreshed, build_native_history_candidates(refreshed)
-
-    refreshed, newer_entries = load_custom_history_update(path, existing_history=history)
-    if native_candidates is not None and newer_entries is not None:
-        if not newer_entries and len(native_candidates) == len(refreshed):
-            return refreshed, native_candidates
-        prepend_replacing = getattr(native_candidates, "prepend_replacing", None)
-        if prepend_replacing is not None:
-            try:
-                prepend_replacing(native_history_candidate_inputs(newer_entries))
-            except (RuntimeError, TypeError, ValueError):
-                pass
-            else:
-                if len(native_candidates) == len(refreshed):
-                    return refreshed, native_candidates
-    return refreshed, build_native_history_candidates(refreshed)
-
-
 def search_history_ranked_native(
     query: str,
     history: list[HistoryEntry],
-    native_candidates: Optional[Any],
+    native_candidates: Any,
     *,
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     current_cwd: Optional[str] = None,
-) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
+) -> tuple[list[MatchResult], Optional[list[int]], int]:
     """Run matching and result ordering in the Rust-owned history cache."""
-    if native_candidates is None or len(native_candidates) != len(history):
-        return None
+    if len(native_candidates) != len(history):
+        raise ValueError("native and Python history lengths differ")
     result_limit = limit if (limit is None or limit > 0) else None
     selected, matched_indices, matched_count = native_candidates.search_ranked(
         query.lower(),
@@ -1534,15 +1310,15 @@ def search_history_ranked_native(
 def search_history_response_json_native(
     query: str,
     history: list[HistoryEntry],
-    native_candidates: Optional[Any],
+    native_candidates: Any,
     *,
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     current_cwd: Optional[str] = None,
-) -> Optional[str]:
+) -> str:
     """Return a complete daemon search response serialized inside Rust."""
-    if native_candidates is None or len(native_candidates) != len(history):
-        return None
+    if len(native_candidates) != len(history):
+        raise ValueError("native and Python history lengths differ")
     return native_history_response_json(
         query,
         native_candidates,
@@ -1773,45 +1549,6 @@ def search(
     return results, matched_indices
 
 
-def match_result_to_payload(item: MatchResult) -> dict[str, Any]:
-    return {
-        "text": item.text,
-        "score": item.score,
-        "exact": item.exact,
-        "recency": item.recency,
-        "cwd": item.cwd,
-        "failed": item.failed,
-        "words": list(item.words),
-    }
-
-
-def match_result_from_payload(payload: object) -> Optional[MatchResult]:
-    if not isinstance(payload, dict):
-        return None
-    text = payload.get("text")
-    score = payload.get("score")
-    exact = payload.get("exact", False)
-    recency = payload.get("recency", 0)
-    cwd = payload.get("cwd")
-    failed = payload.get("failed", False)
-    words = payload.get("words", [])
-    if not isinstance(text, str) or not isinstance(score, int):
-        return None
-    if cwd is not None and not isinstance(cwd, str):
-        return None
-    if not isinstance(words, list) or not all(isinstance(word, str) for word in words):
-        return None
-    return MatchResult(
-        text=text,
-        score=score,
-        exact=bool(exact),
-        recency=int(recency) if isinstance(recency, int) else 0,
-        cwd=cwd,
-        failed=bool(failed),
-        words=tuple(words),
-    )
-
-
 def daemon_send_serialized_request(
     socket_path: Path,
     data: bytes,
@@ -1996,10 +1733,16 @@ class HistoryDaemonClient:
             else None
         )
         normalized_cwd = normalize_cwd_value(cwd) if cwd else None
-        raw_response: Optional[bytes] = None
-        parsed_native: Optional[tuple[list[tuple[Any, ...]], Optional[list[int]], int]] = None
-
-        if _native_search_daemon is not None:
+        exchanged, parsed_native = _native_search_daemon(
+            str(self.socket_path),
+            query,
+            bounded_indices,
+            limit,
+            normalized_cwd,
+        )
+        if not exchanged:
+            if not self.ensure_running():
+                return None
             exchanged, parsed_native = _native_search_daemon(
                 str(self.socket_path),
                 query,
@@ -2008,111 +1751,23 @@ class HistoryDaemonClient:
                 normalized_cwd,
             )
             if not exchanged:
-                if not self.ensure_running():
-                    return None
-                exchanged, parsed_native = _native_search_daemon(
-                    str(self.socket_path),
-                    query,
-                    bounded_indices,
-                    limit,
-                    normalized_cwd,
-                )
-                if not exchanged:
-                    return None
-            if parsed_native is None:
                 return None
-        else:
-            if _native_serialize_search_request is not None:
-                serialized_request = _native_serialize_search_request(
-                    query,
-                    bounded_indices,
-                    limit,
-                    normalized_cwd,
-                )
-            else:
-                payload: dict[str, Any] = {"action": "search_history", "query": query}
-                if bounded_indices is not None:
-                    payload["candidate_indices"] = list(bounded_indices)
-                if limit is not None:
-                    payload["limit"] = limit
-                if normalized_cwd:
-                    payload["cwd"] = normalized_cwd
-                serialized_request = (
-                    json.dumps(payload, separators=(",", ":")) + "\n"
-                ).encode("utf-8")
-
-            raw_response = daemon_send_serialized_request(self.socket_path, serialized_request)
-            if raw_response is None:
-                if not self.ensure_running():
-                    return None
-                raw_response = daemon_send_serialized_request(self.socket_path, serialized_request)
-                if raw_response is None:
-                    return None
-
-            if _native_parse_search_response is not None:
-                parsed_native = _native_parse_search_response(raw_response)
-
-        if parsed_native is not None:
-            raw_results, parsed_indices, matched_count = parsed_native
-            parsed_results = [
-                MatchResult(
-                    text=text,
-                    score=score,
-                    exact=exact,
-                    recency=recency,
-                    cwd=result_cwd,
-                    failed=failed,
-                    words=tuple(words),
-                )
-                for text, score, exact, recency, result_cwd, failed, words in raw_results
-            ]
-            if self.debug:
-                indices_state = "included" if parsed_indices is not None else "omitted"
-                daemon_debug_log(
-                    True,
-                    f"query={query!r} matched_count={matched_count} matched_indices={indices_state}",
-                )
-            return parsed_results, parsed_indices, matched_count
-
-        if raw_response is None:
+        if parsed_native is None:
             return None
 
-        try:
-            response = json.loads(raw_response.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(response, dict):
-            return None
-
-        if response.get("ok") is not True:
-            return None
-
-        raw_results = response.get("history_results")
-        raw_indices = response.get("matched_indices")
-        raw_count = response.get("matched_count")
-        if not isinstance(raw_results, list):
-            return None
-        if raw_indices is not None and not isinstance(raw_indices, list):
-            return None
-
-        parsed_results: list[MatchResult] = []
-        for item in raw_results:
-            parsed = match_result_from_payload(item)
-            if parsed is None:
-                return None
-            parsed_results.append(parsed)
-
-        parsed_indices: Optional[list[int]] = None
-        if isinstance(raw_indices, list):
-            parsed_indices = []
-            for idx in raw_indices:
-                if not isinstance(idx, int):
-                    return None
-                parsed_indices.append(idx)
-
-        matched_count = raw_count if isinstance(raw_count, int) else (
-            len(parsed_indices) if parsed_indices is not None else 0
-        )
+        raw_results, parsed_indices, matched_count = parsed_native
+        parsed_results = [
+            MatchResult(
+                text=text,
+                score=score,
+                exact=exact,
+                recency=recency,
+                cwd=result_cwd,
+                failed=failed,
+                words=tuple(words),
+            )
+            for text, score, exact, recency, result_cwd, failed, words in raw_results
+        ]
         if self.debug:
             indices_state = "included" if parsed_indices is not None else "omitted"
             daemon_debug_log(
@@ -2120,109 +1775,6 @@ class HistoryDaemonClient:
                 f"query={query!r} matched_count={matched_count} matched_indices={indices_state}",
             )
         return parsed_results, parsed_indices, matched_count
-
-
-def daemon_read_request(conn: socket.socket) -> Optional[dict[str, Any]]:
-    chunks: list[bytes] = []
-    total = 0
-    limit = 64 * 1024 * 1024
-    while True:
-        try:
-            chunk = conn.recv(65536)
-        except OSError:
-            return None
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > limit:
-            return None
-        if b"\n" in chunk:
-            break
-    raw = b"".join(chunks)
-    if not raw:
-        return None
-    line = raw.split(b"\n", 1)[0].strip()
-    if not line:
-        return None
-    try:
-        payload = json.loads(line.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload
-
-
-def daemon_write_response(conn: socket.socket, payload: dict[str, Any]) -> None:
-    try:
-        conn.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8"))
-    except OSError:
-        return
-
-
-def daemon_write_serialized_response(conn: socket.socket, payload: str) -> None:
-    try:
-        conn.sendall(payload.encode("utf-8") + b"\n")
-    except OSError:
-        return
-
-
-def daemon_search_response_serialized(
-    query: str,
-    history: list[HistoryEntry],
-    native_history_candidates: Optional[Any],
-    *,
-    candidate_indices: Optional[Sequence[int]],
-    limit: Optional[int],
-    current_cwd: Optional[str],
-) -> str:
-    native_response = search_history_response_json_native(
-        query,
-        history,
-        native_history_candidates,
-        candidate_indices=candidate_indices,
-        limit=limit,
-        current_cwd=current_cwd,
-    )
-    if native_response is not None:
-        return native_response
-
-    native_ranked = search_history_ranked_native(
-        query,
-        history,
-        native_history_candidates,
-        candidate_indices=candidate_indices,
-        limit=limit,
-        current_cwd=current_cwd,
-    )
-    if native_ranked is not None:
-        history_results, indices_payload, matched_count = native_ranked
-    else:
-        history_results_all, matched_indices = search_history_only(
-            query,
-            history,
-            candidate_indices=candidate_indices,
-            limit=None,
-        )
-        history_results = apply_prefix_priority(
-            query,
-            history_results_all,
-            limit=limit,
-            current_cwd=current_cwd,
-        )
-        matched_count = len(matched_indices)
-        indices_payload = daemon_matched_indices_payload(query, matched_indices)
-    return json.dumps(
-        {
-            "ok": True,
-            "history_results": [match_result_to_payload(item) for item in history_results],
-            "matched_indices": indices_payload,
-            "matched_indices_omitted": indices_payload is None,
-            "matched_count": matched_count,
-        },
-        separators=(",", ":"),
-    )
 
 
 def run_history_daemon(
@@ -2263,105 +1815,39 @@ def run_history_daemon(
         except OSError:
             pass
 
-    if _NativeDaemonServer is not None:
-        try:
-            native_server = _NativeDaemonServer(str(socket_path))
-        except OSError as exc:
-            print(f"zsh_flex_history daemon: failed to bind socket: {exc}", file=sys.stderr)
-            return 1
-        daemon_debug_log(debug, f"daemon listening on {socket_path} (history={history_path})")
-        try:
-            while True:
-                try:
-                    request = native_server.accept_search()
-                except OSError:
-                    continue
-
-                new_signature = history_file_signature(history_path)
-                if new_signature != signature:
-                    history_state.refresh()
-                    signature = new_signature
-
-                raw_candidates = request.candidate_indices
-                candidate_indices = None
-                if raw_candidates is not None:
-                    max_idx = len(history_state) - 1
-                    candidate_indices = [idx for idx in raw_candidates if idx <= max_idx]
-                current_cwd = normalize_cwd_value(request.cwd) if request.cwd is not None else None
-                response = history_state.search_response(
-                    request.query,
-                    candidate_indices=candidate_indices,
-                    limit=request.limit,
-                    current_cwd=current_cwd,
-                )
-                request.respond_serialized(response)
-        finally:
+    try:
+        native_server = _NativeDaemonServer(str(socket_path))
+    except OSError as exc:
+        print(f"zsh_flex_history daemon: failed to bind socket: {exc}", file=sys.stderr)
+        return 1
+    daemon_debug_log(debug, f"daemon listening on {socket_path} (history={history_path})")
+    try:
+        while True:
             try:
-                socket_path.unlink()
+                request = native_server.accept_search()
             except OSError:
-                pass
+                continue
 
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            new_signature = history_file_signature(history_path)
+            if new_signature != signature:
+                history_state.refresh()
+                signature = new_signature
+
+            raw_candidates = request.candidate_indices
+            candidate_indices = None
+            if raw_candidates is not None:
+                max_idx = len(history_state) - 1
+                candidate_indices = [idx for idx in raw_candidates if idx <= max_idx]
+            current_cwd = normalize_cwd_value(request.cwd) if request.cwd is not None else None
+            response = history_state.search_response(
+                request.query,
+                candidate_indices=candidate_indices,
+                limit=request.limit,
+                current_cwd=current_cwd,
+            )
+            request.respond_serialized(response)
+    finally:
         try:
-            try:
-                server.bind(str(socket_path))
-                os.chmod(socket_path, 0o600)
-                server.listen(16)
-                daemon_debug_log(debug, f"daemon listening on {socket_path} (history={history_path})")
-            except OSError as exc:
-                print(f"zsh_flex_history daemon: failed to bind socket: {exc}", file=sys.stderr)
-                return 1
-
-            while True:
-                try:
-                    conn, _ = server.accept()
-                except OSError:
-                    continue
-                with conn:
-                    request = daemon_read_request(conn)
-                    if request is None:
-                        daemon_write_response(conn, {"ok": False, "error": "invalid request"})
-                        continue
-
-                    new_signature = history_file_signature(history_path)
-                    if new_signature != signature:
-                        history_state.refresh()
-                        signature = new_signature
-
-                    action = request.get("action")
-                    if action == "ping":
-                        daemon_write_response(conn, {"ok": True})
-                        continue
-
-                    if action != "search_history":
-                        daemon_write_response(conn, {"ok": False, "error": "unknown action"})
-                        continue
-
-                    raw_query = request.get("query", "")
-                    query = raw_query if isinstance(raw_query, str) else str(raw_query)
-                    raw_candidates = request.get("candidate_indices")
-                    candidate_indices: Optional[list[int]] = None
-                    if isinstance(raw_candidates, list):
-                        parsed_candidates: list[int] = []
-                        max_idx = len(history_state) - 1
-                        for item in raw_candidates:
-                            if isinstance(item, int) and 0 <= item <= max_idx:
-                                parsed_candidates.append(item)
-                        candidate_indices = parsed_candidates
-                    raw_limit = request.get("limit")
-                    limit = raw_limit if isinstance(raw_limit, int) else None
-                    raw_cwd = request.get("cwd")
-                    current_cwd = normalize_cwd_value(raw_cwd) if isinstance(raw_cwd, str) else None
-
-                    response = history_state.search_response(
-                        query,
-                        candidate_indices=candidate_indices,
-                        limit=limit,
-                        current_cwd=current_cwd,
-                    )
-                    daemon_write_serialized_response(conn, response)
-        finally:
-            try:
-                socket_path.unlink()
-            except OSError:
-                pass
+            socket_path.unlink()
+        except OSError:
+            pass
