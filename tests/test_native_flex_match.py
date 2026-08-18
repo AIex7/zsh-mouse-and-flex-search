@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import unittest
 from pathlib import Path
@@ -174,6 +175,30 @@ class NativeFlexMatchTests(unittest.TestCase):
             self.assertEqual(actual_indices, expected_payload, query)
             self.assertEqual(actual_count, len(expected_indices), query)
             self.assertEqual(actual_results, expected_results, query)
+
+            serialized = engine.search_history_response_json_native(
+                query,
+                history,
+                native_candidates,
+                candidate_indices=candidate_indices,
+                limit=4,
+                current_cwd="/repo",
+            )
+            self.assertIsNotNone(serialized)
+            assert serialized is not None
+            self.assertEqual(
+                json.loads(serialized),
+                {
+                    "ok": True,
+                    "history_results": [
+                        engine.match_result_to_payload(item) for item in expected_results
+                    ],
+                    "matched_indices": expected_payload,
+                    "matched_indices_omitted": expected_payload is None,
+                    "matched_count": len(expected_indices),
+                },
+                query,
+            )
 
 
 if __name__ == "__main__":

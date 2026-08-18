@@ -1178,6 +1178,7 @@ def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional
                     entry.words
                     or tuple(shell_words_for_matching(entry.text_lower or entry.text.lower()))
                 ),
+                entry.failed,
             )
             for entry in history
         ]
@@ -1223,6 +1224,34 @@ def search_history_ranked_native(
             )
         )
     return results, matched_indices, matched_count
+
+
+def search_history_response_json_native(
+    query: str,
+    history: list[HistoryEntry],
+    native_candidates: Optional[Any],
+    *,
+    candidate_indices: Optional[Sequence[int]] = None,
+    limit: Optional[int] = None,
+    current_cwd: Optional[str] = None,
+) -> Optional[str]:
+    """Return a complete daemon search response serialized inside Rust."""
+    if native_candidates is None or len(native_candidates) != len(history):
+        return None
+    serializer = getattr(native_candidates, "search_response_json", None)
+    if serializer is None:
+        return None
+    result_limit = limit if (limit is None or limit > 0) else None
+    return serializer(
+        query.lower(),
+        query.strip().lower(),
+        shell_words_for_matching(query),
+        query.lower().split(),
+        current_cwd,
+        candidate_indices,
+        result_limit,
+        MAX_CACHED_CANDIDATE_INDICES,
+    )
 
 
 def search_history_only(
@@ -1734,6 +1763,13 @@ def daemon_write_response(conn: socket.socket, payload: dict[str, Any]) -> None:
         return
 
 
+def daemon_write_serialized_response(conn: socket.socket, payload: str) -> None:
+    try:
+        conn.sendall(payload.encode("utf-8") + b"\n")
+    except OSError:
+        return
+
+
 def run_history_daemon(
     history_path: Path,
     socket_path: Path,
@@ -1829,6 +1865,18 @@ def run_history_daemon(
                     limit = raw_limit if isinstance(raw_limit, int) else None
                     raw_cwd = request.get("cwd")
                     current_cwd = normalize_cwd_value(raw_cwd) if isinstance(raw_cwd, str) else None
+
+                    native_response = search_history_response_json_native(
+                        query,
+                        history,
+                        native_history_candidates,
+                        candidate_indices=candidate_indices,
+                        limit=limit,
+                        current_cwd=current_cwd,
+                    )
+                    if native_response is not None:
+                        daemon_write_serialized_response(conn, native_response)
+                        continue
 
                     native_ranked = search_history_ranked_native(
                         query,

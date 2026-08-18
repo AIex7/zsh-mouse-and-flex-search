@@ -1,4 +1,6 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use serde::Serialize;
 use std::collections::HashSet;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
@@ -24,6 +26,21 @@ fn ascii_query(query: &[char]) -> Option<Vec<u8>> {
 fn match_flex_ascii(query: &[u8], candidate: &[u8], candidate_lower: &[u8]) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
+    }
+    if query.len() == 1 {
+        let position = candidate_lower
+            .iter()
+            .position(|character| *character == query[0])?;
+        let boundary_bonus = if position == 0 {
+            12
+        } else if is_word_boundary_byte(candidate[position - 1]) {
+            8
+        } else {
+            0
+        };
+        return Some(
+            boundary_bonus + (30_i64 - position as i64).max(0) + 20 - (candidate.len() / 8) as i64,
+        );
     }
 
     let mut query_index = 0;
@@ -150,6 +167,7 @@ struct NativeCandidate {
     normalized_text: String,
     cwd: Option<String>,
     words: Vec<String>,
+    failed: bool,
     ascii: bool,
     boundary_characters: Vec<bool>,
     character_count: usize,
@@ -162,6 +180,7 @@ impl NativeCandidate {
         normalized_text: String,
         cwd: Option<String>,
         words: Vec<String>,
+        failed: bool,
     ) -> Self {
         let ascii = text.is_ascii() && text_lower.is_ascii();
         let boundary_characters = if ascii {
@@ -182,6 +201,7 @@ impl NativeCandidate {
             normalized_text,
             cwd,
             words,
+            failed,
             ascii,
             boundary_characters,
             character_count,
@@ -200,6 +220,28 @@ impl NativeCandidate {
         }
         if query.is_empty() {
             return Some(0);
+        }
+        if query.len() == 1 {
+            let position = self
+                .text_lower
+                .chars()
+                .position(|character| character == query[0])?;
+            let boundary_bonus = if position == 0 {
+                12
+            } else if self
+                .boundary_characters
+                .get(position - 1)
+                .copied()
+                .unwrap_or(false)
+            {
+                8
+            } else {
+                0
+            };
+            return Some(
+                boundary_bonus + (30_i64 - position as i64).max(0) + 20
+                    - (self.character_count / 8) as i64,
+            );
         }
 
         let mut query_index = 0;
@@ -268,12 +310,36 @@ struct NativeHistory {
     candidates: Vec<NativeCandidate>,
 }
 
+type CandidateInput = (String, String, String, Option<String>, Vec<String>, bool);
+
 struct RankedMatch {
     index: usize,
     score: i64,
-    prefix_word_count: usize,
-    words_in_order: bool,
-    same_cwd: bool,
+    prefix_word_count: u32,
+    ranking_flags: u8,
+}
+
+const WORDS_IN_ORDER: u8 = 1;
+const SAME_CWD: u8 = 2;
+
+#[derive(Serialize)]
+struct HistoryResultPayload<'a> {
+    text: &'a str,
+    score: i64,
+    exact: bool,
+    recency: i64,
+    cwd: Option<&'a str>,
+    failed: bool,
+    words: &'a [String],
+}
+
+#[derive(Serialize)]
+struct SearchResponsePayload<'a> {
+    ok: bool,
+    history_results: Vec<HistoryResultPayload<'a>>,
+    matched_indices: Option<&'a [usize]>,
+    matched_indices_omitted: bool,
+    matched_count: usize,
 }
 
 fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
@@ -293,11 +359,11 @@ fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
 #[pymethods]
 impl NativeHistory {
     #[new]
-    fn new(candidates: Vec<(String, String, String, Option<String>, Vec<String>)>) -> Self {
+    fn new(candidates: Vec<CandidateInput>) -> Self {
         let candidates = candidates
             .into_iter()
-            .map(|(text, text_lower, normalized_text, cwd, words)| {
-                NativeCandidate::new(text, text_lower, normalized_text, cwd, words)
+            .map(|(text, text_lower, normalized_text, cwd, words, failed)| {
+                NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
             })
             .collect();
         Self { candidates }
@@ -362,7 +428,7 @@ impl NativeHistory {
                 Some(Vec::new())
             };
             let mut matched_count = 0;
-            let mut max_prefix_word_count = 0;
+            let mut max_prefix_word_count = 0_u32;
 
             let mut check_candidate = |index: usize| {
                 let Some(candidate) = self.candidates.get(index) else {
@@ -390,19 +456,20 @@ impl NativeHistory {
                     .take_while(|(query_word, candidate_word)| {
                         candidate_word.starts_with(query_word.as_str())
                     })
-                    .count();
+                    .count()
+                    .min(u32::MAX as usize) as u32;
                 max_prefix_word_count = max_prefix_word_count.max(prefix_word_count);
+                let words_in_order =
+                    words_appear_in_order(&ordered_query_words, &candidate.text_lower);
+                let same_cwd = current_cwd
+                    .as_deref()
+                    .is_some_and(|cwd| candidate.cwd.as_deref() == Some(cwd));
                 matches.push(RankedMatch {
                     index,
                     score,
                     prefix_word_count,
-                    words_in_order: words_appear_in_order(
-                        &ordered_query_words,
-                        &candidate.text_lower,
-                    ),
-                    same_cwd: current_cwd
-                        .as_deref()
-                        .is_some_and(|cwd| candidate.cwd.as_deref() == Some(cwd)),
+                    ranking_flags: (u8::from(words_in_order) * WORDS_IN_ORDER)
+                        | (u8::from(same_cwd) * SAME_CWD),
                 });
             };
 
@@ -432,8 +499,10 @@ impl NativeHistory {
                         } else {
                             0
                         };
-                        let matched_inner_bucket = match (matched.words_in_order, matched.same_cwd)
-                        {
+                        let matched_inner_bucket = match (
+                            matched.ranking_flags & WORDS_IN_ORDER != 0,
+                            matched.ranking_flags & SAME_CWD != 0,
+                        ) {
                             (true, true) => 0,
                             (true, false) => 1,
                             (false, true) => 2,
@@ -457,6 +526,55 @@ impl NativeHistory {
             }
             (selected, matched_indices, matched_count)
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_response_json(
+        &self,
+        py: Python<'_>,
+        query_lower: &str,
+        normalized_query: &str,
+        prefix_query_words: Vec<String>,
+        ordered_query_words: Vec<String>,
+        current_cwd: Option<String>,
+        candidate_indices: Option<Vec<usize>>,
+        limit: Option<usize>,
+        max_returned_indices: usize,
+    ) -> PyResult<String> {
+        let (selected, matched_indices, matched_count) = self.search_ranked(
+            py,
+            query_lower,
+            normalized_query,
+            prefix_query_words,
+            ordered_query_words,
+            current_cwd,
+            candidate_indices,
+            limit,
+            max_returned_indices,
+        );
+        let history_results = selected
+            .iter()
+            .map(|(index, score)| {
+                let candidate = &self.candidates[*index];
+                HistoryResultPayload {
+                    text: &candidate.text,
+                    score: *score,
+                    exact: false,
+                    recency: -(*index as i64),
+                    cwd: candidate.cwd.as_deref(),
+                    failed: candidate.failed,
+                    words: &candidate.words,
+                }
+            })
+            .collect();
+        let response = SearchResponsePayload {
+            ok: true,
+            history_results,
+            matched_indices: matched_indices.as_deref(),
+            matched_indices_omitted: matched_indices.is_none(),
+            matched_count,
+        };
+        serde_json::to_string(&response).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 }
 
