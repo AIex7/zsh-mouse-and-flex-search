@@ -702,6 +702,15 @@ impl NativeHistory {
         self.candidates.len()
     }
 
+    /// Append a batch while initially loading a large history.
+    fn extend(&mut self, candidates: Vec<CandidateInput>) {
+        self.candidates.extend(candidates.into_iter().map(
+            |(text, text_lower, normalized_text, cwd, words, failed)| {
+                NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
+            },
+        ));
+    }
+
     /// Prepend newly loaded SQLite rows and discard older rows they replace.
     ///
     /// Retained candidates keep their owned strings and precomputed metadata;

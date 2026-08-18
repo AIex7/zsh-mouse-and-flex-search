@@ -14,6 +14,13 @@ uv tool install git+https://github.com/uAIex/zsh-mouse-and-flex-search
 printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
+Normal installs use optimized Rust, and this project also configures editable
+installs to use the release profile. To rebuild manually, run:
+
+```bash
+uv run --with maturin maturin develop --release
+```
+
 Or install from a local checkout:
 
 ```bash

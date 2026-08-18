@@ -567,19 +567,7 @@ def ensure_custom_history_file(path: Path) -> None:
         conn.commit()
 
 
-def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list[HistoryEntry]:
-    if not path.exists():
-        return []
-    query = "SELECT command, cwd, timestamp, failed FROM custom_history ORDER BY id DESC"
-    params: tuple[object, ...] = ()
-    if limit is not None and limit > 0:
-        query += " LIMIT ?"
-        params = (limit,)
-    try:
-        with sqlite3.connect(path) as conn:
-            rows = conn.execute(query, params).fetchall()
-    except (OSError, sqlite3.Error):
-        return []
+def custom_history_entries_from_rows(rows: Sequence[object]) -> list[HistoryEntry]:
     entries: list[HistoryEntry] = []
     for row in rows:
         if not isinstance(row, tuple) or len(row) < 3:
@@ -603,6 +591,22 @@ def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list
                 )
             )
     return entries
+
+
+def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list[HistoryEntry]:
+    if not path.exists():
+        return []
+    query = "SELECT command, cwd, timestamp, failed FROM custom_history ORDER BY id DESC"
+    params: tuple[object, ...] = ()
+    if limit is not None and limit > 0:
+        query += " LIMIT ?"
+        params = (limit,)
+    try:
+        with sqlite3.connect(path) as conn:
+            rows = conn.execute(query, params).fetchall()
+    except (OSError, sqlite3.Error):
+        return []
+    return custom_history_entries_from_rows(rows)
 
 
 def load_custom_history_update(
@@ -1217,6 +1221,247 @@ def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional
     return _NativeHistory(native_history_candidate_inputs(history))
 
 
+def build_native_custom_history_candidates(
+    path: Path,
+    *,
+    limit: Optional[int] = None,
+    batch_size: int = 1_000,
+) -> tuple[Optional[Any], list[HistoryEntry]]:
+    """Stream SQLite history into Rust without retaining a full Python copy."""
+    if _NativeHistory is None:
+        return None, []
+    native_candidates = _NativeHistory([])
+    extend = getattr(native_candidates, "extend", None)
+    if extend is None:
+        history = load_custom_history_rows(path, limit=limit)
+        return build_native_history_candidates(history), history[:10]
+    if not path.exists():
+        return native_candidates, []
+
+    query = "SELECT command, cwd, timestamp, failed FROM custom_history ORDER BY id DESC"
+    params: tuple[object, ...] = ()
+    if limit is not None and limit > 0:
+        query += " LIMIT ?"
+        params = (limit,)
+    recent_entries: list[HistoryEntry] = []
+    try:
+        with sqlite3.connect(path) as conn:
+            cursor = conn.execute(query, params)
+            while True:
+                rows = cursor.fetchmany(batch_size)
+                if not rows:
+                    break
+                entries = custom_history_entries_from_rows(rows)
+                if len(recent_entries) < 10:
+                    recent_entries.extend(entries[: 10 - len(recent_entries)])
+                extend(native_history_candidate_inputs(entries))
+    except (OSError, sqlite3.Error):
+        return _NativeHistory([]), []
+    return native_candidates, recent_entries
+
+
+def native_history_response_json(
+    query: str,
+    native_candidates: Optional[Any],
+    *,
+    candidate_indices: Optional[Sequence[int]] = None,
+    limit: Optional[int] = None,
+    current_cwd: Optional[str] = None,
+) -> Optional[str]:
+    """Serialize a complete search response without a Python history list."""
+    if native_candidates is None:
+        return None
+    serializer = getattr(native_candidates, "search_response_json", None)
+    if serializer is None:
+        return None
+    result_limit = limit if (limit is None or limit > 0) else None
+    return serializer(
+        query.lower(),
+        query.strip().lower(),
+        shell_words_for_matching(query),
+        query.lower().split(),
+        current_cwd,
+        candidate_indices,
+        result_limit,
+        MAX_CACHED_CANDIDATE_INDICES,
+    )
+
+
+def history_entry_refresh_key(entry: HistoryEntry) -> tuple[Optional[str], str, Optional[str], bool]:
+    return entry.timestamp, entry.text, entry.cwd, entry.failed
+
+
+@dataclass
+class DaemonHistoryState:
+    path: Path
+    use_custom_history: bool
+    history_length: Optional[int]
+    python_history: Optional[list[HistoryEntry]]
+    native_candidates: Optional[Any]
+    recent_entries: list[HistoryEntry]
+
+    @classmethod
+    def load(
+        cls,
+        path: Path,
+        *,
+        use_custom_history: bool,
+        history_length: Optional[int],
+    ) -> "DaemonHistoryState":
+        if _NativeHistory is not None and use_custom_history:
+            native_candidates, recent_entries = build_native_custom_history_candidates(
+                path,
+                limit=history_length,
+            )
+            if native_candidates is not None:
+                return cls(
+                    path,
+                    use_custom_history,
+                    history_length,
+                    None,
+                    native_candidates,
+                    recent_entries,
+                )
+
+        history = load_history_source(
+            path,
+            use_custom_history=use_custom_history,
+            history_length=history_length if use_custom_history else None,
+        )
+        native_candidates = build_native_history_candidates(history)
+        if native_candidates is not None:
+            return cls(
+                path,
+                use_custom_history,
+                history_length,
+                None,
+                native_candidates,
+                history[:10] if use_custom_history else [],
+            )
+        return cls(path, use_custom_history, history_length, history, None, [])
+
+    def __len__(self) -> int:
+        if self.native_candidates is not None:
+            return len(self.native_candidates)
+        return len(self.python_history or ())
+
+    def _rebuild_native(self) -> None:
+        if self.use_custom_history and _NativeHistory is not None:
+            native_candidates, recent_entries = build_native_custom_history_candidates(self.path)
+            if native_candidates is not None:
+                self.python_history = None
+                self.native_candidates = native_candidates
+                self.recent_entries = recent_entries
+                return
+
+        history = load_history_source(
+            self.path,
+            use_custom_history=self.use_custom_history,
+        )
+        native_candidates = build_native_history_candidates(history)
+        if native_candidates is not None:
+            self.python_history = None
+            self.native_candidates = native_candidates
+            self.recent_entries = history[:10] if self.use_custom_history else []
+        else:
+            self.python_history = history
+            self.native_candidates = None
+            self.recent_entries = []
+
+    def refresh(self) -> None:
+        if self.native_candidates is None:
+            history = self.python_history or []
+            refreshed, native_candidates = refresh_history_caches(
+                self.path,
+                use_custom_history=self.use_custom_history,
+                history=history,
+                native_candidates=None,
+            )
+            self.python_history = refreshed
+            self.native_candidates = native_candidates
+            if native_candidates is not None:
+                self.recent_entries = refreshed[:10]
+                self.python_history = None
+            return
+
+        if not self.use_custom_history:
+            self._rebuild_native()
+            return
+
+        latest_entries = load_custom_history_rows(self.path, limit=10)
+        if not latest_entries:
+            self._rebuild_native()
+            return
+        existing_keys = {
+            history_entry_refresh_key(entry)
+            for entry in self.recent_entries
+            if entry.timestamp is not None
+        }
+        overlap_at: Optional[int] = None
+        for idx, entry in enumerate(latest_entries):
+            if history_entry_refresh_key(entry) in existing_keys:
+                overlap_at = idx
+                break
+        if overlap_at is None:
+            self._rebuild_native()
+            return
+
+        newer_entries = [
+            entry
+            for entry in latest_entries[:overlap_at]
+            if history_entry_refresh_key(entry) not in existing_keys
+        ]
+        if newer_entries:
+            prepend_replacing = getattr(self.native_candidates, "prepend_replacing", None)
+            if prepend_replacing is None:
+                self._rebuild_native()
+                return
+            try:
+                prepend_replacing(native_history_candidate_inputs(newer_entries))
+            except (RuntimeError, TypeError, ValueError):
+                self._rebuild_native()
+                return
+        self.recent_entries = latest_entries
+
+    def search_response(
+        self,
+        query: str,
+        *,
+        candidate_indices: Optional[Sequence[int]],
+        limit: Optional[int],
+        current_cwd: Optional[str],
+    ) -> str:
+        if self.native_candidates is not None:
+            try:
+                response = native_history_response_json(
+                    query,
+                    self.native_candidates,
+                    candidate_indices=candidate_indices,
+                    limit=limit,
+                    current_cwd=current_cwd,
+                )
+            except Exception:
+                response = None
+            if response is not None:
+                return response
+            self.python_history = load_history_source(
+                self.path,
+                use_custom_history=self.use_custom_history,
+            )
+            self.native_candidates = None
+            self.recent_entries = []
+
+        history = self.python_history or []
+        return daemon_search_response_serialized(
+            query,
+            history,
+            None,
+            candidate_indices=candidate_indices,
+            limit=limit,
+            current_cwd=current_cwd,
+        )
+
+
 def refresh_history_caches(
     path: Path,
     *,
@@ -1298,19 +1543,12 @@ def search_history_response_json_native(
     """Return a complete daemon search response serialized inside Rust."""
     if native_candidates is None or len(native_candidates) != len(history):
         return None
-    serializer = getattr(native_candidates, "search_response_json", None)
-    if serializer is None:
-        return None
-    result_limit = limit if (limit is None or limit > 0) else None
-    return serializer(
-        query.lower(),
-        query.strip().lower(),
-        shell_words_for_matching(query),
-        query.lower().split(),
-        current_cwd,
-        candidate_indices,
-        result_limit,
-        MAX_CACHED_CANDIDATE_INDICES,
+    return native_history_response_json(
+        query,
+        native_candidates,
+        candidate_indices=candidate_indices,
+        limit=limit,
+        current_cwd=current_cwd,
     )
 
 
@@ -2001,12 +2239,11 @@ def run_history_daemon(
         except OSError as exc:
             print(f"zsh_flex_history daemon: failed to initialize custom history: {exc}", file=sys.stderr)
             return 1
-    history = load_history_source(
+    history_state = DaemonHistoryState.load(
         history_path,
         use_custom_history=use_custom_history,
         history_length=history_length if use_custom_history else None,
     )
-    native_history_candidates = build_native_history_candidates(history)
     signature = history_file_signature(history_path)
 
     try:
@@ -2042,24 +2279,17 @@ def run_history_daemon(
 
                 new_signature = history_file_signature(history_path)
                 if new_signature != signature:
-                    history, native_history_candidates = refresh_history_caches(
-                        history_path,
-                        use_custom_history=use_custom_history,
-                        history=history,
-                        native_candidates=native_history_candidates,
-                    )
+                    history_state.refresh()
                     signature = new_signature
 
                 raw_candidates = request.candidate_indices
                 candidate_indices = None
                 if raw_candidates is not None:
-                    max_idx = len(history) - 1
+                    max_idx = len(history_state) - 1
                     candidate_indices = [idx for idx in raw_candidates if idx <= max_idx]
                 current_cwd = normalize_cwd_value(request.cwd) if request.cwd is not None else None
-                response = daemon_search_response_serialized(
+                response = history_state.search_response(
                     request.query,
-                    history,
-                    native_history_candidates,
                     candidate_indices=candidate_indices,
                     limit=request.limit,
                     current_cwd=current_cwd,
@@ -2095,12 +2325,7 @@ def run_history_daemon(
 
                     new_signature = history_file_signature(history_path)
                     if new_signature != signature:
-                        history, native_history_candidates = refresh_history_caches(
-                            history_path,
-                            use_custom_history=use_custom_history,
-                            history=history,
-                            native_candidates=native_history_candidates,
-                        )
+                        history_state.refresh()
                         signature = new_signature
 
                     action = request.get("action")
@@ -2118,7 +2343,7 @@ def run_history_daemon(
                     candidate_indices: Optional[list[int]] = None
                     if isinstance(raw_candidates, list):
                         parsed_candidates: list[int] = []
-                        max_idx = len(history) - 1
+                        max_idx = len(history_state) - 1
                         for item in raw_candidates:
                             if isinstance(item, int) and 0 <= item <= max_idx:
                                 parsed_candidates.append(item)
@@ -2128,10 +2353,8 @@ def run_history_daemon(
                     raw_cwd = request.get("cwd")
                     current_cwd = normalize_cwd_value(raw_cwd) if isinstance(raw_cwd, str) else None
 
-                    response = daemon_search_response_serialized(
+                    response = history_state.search_response(
                         query,
-                        history,
-                        native_history_candidates,
                         candidate_indices=candidate_indices,
                         limit=limit,
                         current_cwd=current_cwd,

@@ -21,3 +21,4 @@ zsh-flex-history-init-zsh = "zsh_flex_history.init_zsh:main"
 [tool.maturin]
 module-name = "zsh_flex_history._flex_match"
 python-source = "src"
+editable-profile = "release"
