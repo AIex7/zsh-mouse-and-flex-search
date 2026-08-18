@@ -1186,8 +1186,62 @@ def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional
     if _NativeHistory is None:
         return None
     return _NativeHistory(
-        [(entry.text, entry.text_lower or entry.text.lower()) for entry in history]
+        [
+            (
+                entry.text,
+                entry.text_lower or entry.text.lower(),
+                entry.text.strip().lower(),
+                entry.cwd,
+                list(
+                    entry.words
+                    or tuple(shell_words_for_matching(entry.text_lower or entry.text.lower()))
+                ),
+            )
+            for entry in history
+        ]
     )
+
+
+def search_history_ranked_native(
+    query: str,
+    history: list[HistoryEntry],
+    native_candidates: Optional[Any],
+    *,
+    candidate_indices: Optional[Sequence[int]] = None,
+    limit: Optional[int] = None,
+    current_cwd: Optional[str] = None,
+) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
+    """Run matching and result ordering in the Rust-owned history cache."""
+    if native_candidates is None or len(native_candidates) != len(history):
+        return None
+    result_limit = limit if (limit is None or limit > 0) else None
+    selected, matched_indices, matched_count = native_candidates.search_ranked(
+        query.lower(),
+        query.strip().lower(),
+        shell_words_for_matching(query),
+        query.lower().split(),
+        current_cwd,
+        candidate_indices,
+        result_limit,
+        MAX_CACHED_CANDIDATE_INDICES,
+    )
+    results: list[MatchResult] = []
+    for idx, score, positions in selected:
+        entry = history[idx]
+        results.append(
+            MatchResult(
+                entry.text,
+                score,
+                positions,
+                exact=False,
+                recency=-idx,
+                cwd=entry.cwd,
+                text_lower=entry.text_lower,
+                failed=entry.failed,
+                words=entry.words,
+            )
+        )
+    return results, matched_indices, matched_count
 
 
 def search_history_only(
@@ -1807,24 +1861,34 @@ def run_history_daemon(
                     raw_cwd = request.get("cwd")
                     current_cwd = normalize_cwd_value(raw_cwd) if isinstance(raw_cwd, str) else None
 
-                    history_results_all, matched_indices = search_history_only(
+                    native_ranked = search_history_ranked_native(
                         query,
                         history,
+                        native_history_candidates,
                         candidate_indices=candidate_indices,
-                        limit=None,
-                        native_candidates=native_history_candidates,
-                    )
-                    history_results = apply_prefix_priority(
-                        query,
-                        history_results_all,
                         limit=limit,
                         current_cwd=current_cwd,
                     )
-                    matched_count = len(matched_indices)
-                    # The client never sends candidate lists over this limit
-                    # back to us, so returning them only wastes JSON encoding,
-                    # socket traffic, and frontend memory.
-                    indices_payload = daemon_matched_indices_payload(query, matched_indices)
+                    if native_ranked is not None:
+                        history_results, indices_payload, matched_count = native_ranked
+                    else:
+                        history_results_all, matched_indices = search_history_only(
+                            query,
+                            history,
+                            candidate_indices=candidate_indices,
+                            limit=None,
+                        )
+                        history_results = apply_prefix_priority(
+                            query,
+                            history_results_all,
+                            limit=limit,
+                            current_cwd=current_cwd,
+                        )
+                        matched_count = len(matched_indices)
+                        # The client never sends candidate lists over this limit
+                        # back to us, so returning them only wastes JSON encoding,
+                        # socket traffic, and frontend memory.
+                        indices_payload = daemon_matched_indices_payload(query, matched_indices)
                     daemon_write_response(
                         conn,
                         {
