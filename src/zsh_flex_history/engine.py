@@ -27,9 +27,11 @@ from typing import Any, Optional, Sequence
 try:
     from ._flex_match import NativeHistory as _NativeHistory
     from ._flex_match import flex_match as _native_flex_match
+    from ._flex_match import parse_search_response as _native_parse_search_response
 except ImportError:
     _NativeHistory = None
     _native_flex_match = None
+    _native_parse_search_response = None
 
 ANSI_COLOR_NAMES = {
     "black": 0,
@@ -1514,7 +1516,12 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
     )
 
 
-def daemon_send_request(socket_path: Path, payload: dict[str, Any], *, timeout: float = 0.5) -> Optional[dict[str, Any]]:
+def daemon_send_raw_request(
+    socket_path: Path,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 0.5,
+) -> Optional[bytes]:
     data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -1542,6 +1549,13 @@ def daemon_send_request(socket_path: Path, payload: dict[str, Any], *, timeout: 
         return None
     line = raw.split(b"\n", 1)[0].strip()
     if not line:
+        return None
+    return line
+
+
+def daemon_send_request(socket_path: Path, payload: dict[str, Any], *, timeout: float = 0.5) -> Optional[dict[str, Any]]:
+    line = daemon_send_raw_request(socket_path, payload, timeout=timeout)
+    if line is None:
         return None
     try:
         decoded = json.loads(line.decode("utf-8"))
@@ -1678,13 +1692,44 @@ class HistoryDaemonClient:
         if cwd:
             payload["cwd"] = normalize_cwd_value(cwd)
 
-        response = daemon_send_request(self.socket_path, payload)
-        if response is None:
+        raw_response = daemon_send_raw_request(self.socket_path, payload)
+        if raw_response is None:
             if not self.ensure_running():
                 return None
-            response = daemon_send_request(self.socket_path, payload)
-            if response is None:
+            raw_response = daemon_send_raw_request(self.socket_path, payload)
+            if raw_response is None:
                 return None
+
+        if _native_parse_search_response is not None:
+            parsed_native = _native_parse_search_response(raw_response)
+            if parsed_native is not None:
+                raw_results, parsed_indices, matched_count = parsed_native
+                parsed_results = [
+                    MatchResult(
+                        text=text,
+                        score=score,
+                        exact=exact,
+                        recency=recency,
+                        cwd=result_cwd,
+                        failed=failed,
+                        words=tuple(words),
+                    )
+                    for text, score, exact, recency, result_cwd, failed, words in raw_results
+                ]
+                if self.debug:
+                    indices_state = "included" if parsed_indices is not None else "omitted"
+                    daemon_debug_log(
+                        True,
+                        f"query={query!r} matched_count={matched_count} matched_indices={indices_state}",
+                    )
+                return parsed_results, parsed_indices, matched_count
+
+        try:
+            response = json.loads(raw_response.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(response, dict):
+            return None
 
         if response.get("ok") is not True:
             return None

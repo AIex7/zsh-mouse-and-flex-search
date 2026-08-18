@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
@@ -342,6 +342,33 @@ struct SearchResponsePayload<'a> {
     matched_count: usize,
 }
 
+#[derive(Deserialize)]
+struct ParsedHistoryResult {
+    text: String,
+    score: i64,
+    #[serde(default)]
+    exact: bool,
+    #[serde(default)]
+    recency: i64,
+    cwd: Option<String>,
+    #[serde(default)]
+    failed: bool,
+    #[serde(default)]
+    words: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ParsedSearchResponse {
+    #[serde(default)]
+    ok: bool,
+    history_results: Vec<ParsedHistoryResult>,
+    matched_indices: Option<Vec<usize>>,
+    matched_count: Option<usize>,
+}
+
+type ParsedResult = (String, i64, bool, i64, Option<String>, bool, Vec<String>);
+type ParsedResponse = (Vec<ParsedResult>, Option<Vec<usize>>, usize);
+
 fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
     if words.is_empty() {
         return false;
@@ -583,8 +610,36 @@ fn flex_match(query_lower: &str, candidate: &str, candidate_lower: &str) -> Opti
     match_flex(&compact_query(query_lower), candidate, candidate_lower)
 }
 
+#[pyfunction]
+fn parse_search_response(raw: &[u8]) -> Option<ParsedResponse> {
+    let response: ParsedSearchResponse = serde_json::from_slice(raw).ok()?;
+    if !response.ok {
+        return None;
+    }
+    let matched_count = response
+        .matched_count
+        .unwrap_or_else(|| response.matched_indices.as_ref().map_or(0, Vec::len));
+    let results = response
+        .history_results
+        .into_iter()
+        .map(|result| {
+            (
+                result.text,
+                result.score,
+                result.exact,
+                result.recency,
+                result.cwd,
+                result.failed,
+                result.words,
+            )
+        })
+        .collect();
+    Some((results, response.matched_indices, matched_count))
+}
+
 #[pymodule]
 fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeHistory>()?;
-    module.add_function(wrap_pyfunction!(flex_match, module)?)
+    module.add_function(wrap_pyfunction!(flex_match, module)?)?;
+    module.add_function(wrap_pyfunction!(parse_search_response, module)?)
 }

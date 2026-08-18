@@ -199,6 +199,32 @@ class NativeFlexMatchTests(unittest.TestCase):
                 },
                 query,
             )
+            self.assertIsNotNone(engine._native_parse_search_response)
+            parsed_response = engine._native_parse_search_response(serialized.encode("utf-8"))
+            self.assertIsNotNone(parsed_response)
+            assert parsed_response is not None
+            parsed_results, parsed_indices, parsed_count = parsed_response
+            self.assertEqual(parsed_indices, expected_payload, query)
+            self.assertEqual(parsed_count, len(expected_indices), query)
+            self.assertEqual(
+                parsed_results,
+                [
+                    (
+                        item.text,
+                        item.score,
+                        item.exact,
+                        item.recency,
+                        item.cwd,
+                        item.failed,
+                        list(item.words),
+                    )
+                    for item in expected_results
+                ],
+                query,
+            )
+
+        self.assertIsNone(engine._native_parse_search_response(b"not json"))
+        self.assertIsNone(engine._native_parse_search_response(b'{"ok":false}'))
 
 
 if __name__ == "__main__":
