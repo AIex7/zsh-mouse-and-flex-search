@@ -1,5 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -342,6 +343,18 @@ struct SearchResponsePayload<'a> {
     matched_count: usize,
 }
 
+#[derive(Serialize)]
+struct SearchRequestPayload<'a> {
+    action: &'static str,
+    query: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate_indices: Option<&'a [usize]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<&'a str>,
+}
+
 #[derive(Deserialize)]
 struct ParsedHistoryResult {
     text: String,
@@ -637,9 +650,32 @@ fn parse_search_response(raw: &[u8]) -> Option<ParsedResponse> {
     Some((results, response.matched_indices, matched_count))
 }
 
+#[pyfunction]
+#[pyo3(signature = (query, candidate_indices=None, limit=None, cwd=None))]
+fn serialize_search_request<'py>(
+    py: Python<'py>,
+    query: &str,
+    candidate_indices: Option<Vec<usize>>,
+    limit: Option<i64>,
+    cwd: Option<&str>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let payload = SearchRequestPayload {
+        action: "search_history",
+        query,
+        candidate_indices: candidate_indices.as_deref(),
+        limit,
+        cwd,
+    };
+    let mut serialized =
+        serde_json::to_vec(&payload).map_err(|error| PyValueError::new_err(error.to_string()))?;
+    serialized.push(b'\n');
+    Ok(PyBytes::new(py, &serialized))
+}
+
 #[pymodule]
 fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeHistory>()?;
     module.add_function(wrap_pyfunction!(flex_match, module)?)?;
-    module.add_function(wrap_pyfunction!(parse_search_response, module)?)
+    module.add_function(wrap_pyfunction!(parse_search_response, module)?)?;
+    module.add_function(wrap_pyfunction!(serialize_search_request, module)?)
 }

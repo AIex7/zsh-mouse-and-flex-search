@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import unittest
+from array import array
 from pathlib import Path
 from unittest.mock import patch
 
@@ -225,6 +226,30 @@ class NativeFlexMatchTests(unittest.TestCase):
 
         self.assertIsNone(engine._native_parse_search_response(b"not json"))
         self.assertIsNone(engine._native_parse_search_response(b'{"ok":false}'))
+
+    def test_native_search_request_serialization(self) -> None:
+        self.assertIsNotNone(engine._native_serialize_search_request)
+        serialized = engine._native_serialize_search_request(
+            "git st",
+            array("I", [1, 3, 8]),
+            100,
+            "/repo",
+        )
+        self.assertTrue(serialized.endswith(b"\n"))
+        self.assertEqual(
+            json.loads(serialized),
+            {
+                "action": "search_history",
+                "query": "git st",
+                "candidate_indices": [1, 3, 8],
+                "limit": 100,
+                "cwd": "/repo",
+            },
+        )
+        self.assertEqual(
+            json.loads(engine._native_serialize_search_request("x")),
+            {"action": "search_history", "query": "x"},
+        )
 
 
 if __name__ == "__main__":

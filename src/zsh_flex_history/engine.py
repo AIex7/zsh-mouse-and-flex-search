@@ -28,10 +28,12 @@ try:
     from ._flex_match import NativeHistory as _NativeHistory
     from ._flex_match import flex_match as _native_flex_match
     from ._flex_match import parse_search_response as _native_parse_search_response
+    from ._flex_match import serialize_search_request as _native_serialize_search_request
 except ImportError:
     _NativeHistory = None
     _native_flex_match = None
     _native_parse_search_response = None
+    _native_serialize_search_request = None
 
 ANSI_COLOR_NAMES = {
     "black": 0,
@@ -1516,13 +1518,12 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
     )
 
 
-def daemon_send_raw_request(
+def daemon_send_serialized_request(
     socket_path: Path,
-    payload: dict[str, Any],
+    data: bytes,
     *,
     timeout: float = 0.5,
 ) -> Optional[bytes]:
-    data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
@@ -1551,6 +1552,16 @@ def daemon_send_raw_request(
     if not line:
         return None
     return line
+
+
+def daemon_send_raw_request(
+    socket_path: Path,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 0.5,
+) -> Optional[bytes]:
+    data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+    return daemon_send_serialized_request(socket_path, data, timeout=timeout)
 
 
 def daemon_send_request(socket_path: Path, payload: dict[str, Any], *, timeout: float = 0.5) -> Optional[dict[str, Any]]:
@@ -1684,19 +1695,37 @@ class HistoryDaemonClient:
         limit: Optional[int] = None,
         cwd: Optional[str] = None,
     ) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
-        payload: dict[str, Any] = {"action": "search_history", "query": query}
-        if candidate_indices is not None and len(candidate_indices) <= MAX_CACHED_CANDIDATE_INDICES:
-            payload["candidate_indices"] = list(candidate_indices)
-        if limit is not None:
-            payload["limit"] = limit
-        if cwd:
-            payload["cwd"] = normalize_cwd_value(cwd)
+        bounded_indices = (
+            candidate_indices
+            if candidate_indices is not None
+            and len(candidate_indices) <= MAX_CACHED_CANDIDATE_INDICES
+            else None
+        )
+        normalized_cwd = normalize_cwd_value(cwd) if cwd else None
+        if _native_serialize_search_request is not None:
+            serialized_request = _native_serialize_search_request(
+                query,
+                bounded_indices,
+                limit,
+                normalized_cwd,
+            )
+        else:
+            payload: dict[str, Any] = {"action": "search_history", "query": query}
+            if bounded_indices is not None:
+                payload["candidate_indices"] = list(bounded_indices)
+            if limit is not None:
+                payload["limit"] = limit
+            if normalized_cwd:
+                payload["cwd"] = normalized_cwd
+            serialized_request = (json.dumps(payload, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            )
 
-        raw_response = daemon_send_raw_request(self.socket_path, payload)
+        raw_response = daemon_send_serialized_request(self.socket_path, serialized_request)
         if raw_response is None:
             if not self.ensure_running():
                 return None
-            raw_response = daemon_send_raw_request(self.socket_path, payload)
+            raw_response = daemon_send_serialized_request(self.socket_path, serialized_request)
             if raw_response is None:
                 return None
 
