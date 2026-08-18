@@ -1136,16 +1136,19 @@ def insert_runtime_completions(
     for index, item in enumerate(merged):
         if item.text in runtime_texts:
             merged[index] = replace(item, runtime_completion=True)
+    merged_texts = {item.text for item in merged}
     insertion_index = 0
     for runtime_completion in runtime_completions[:featured_count]:
-        if any(item.text == runtime_completion.text for item in merged):
+        if runtime_completion.text in merged_texts:
             continue
         merged.insert(insertion_index, runtime_completion)
+        merged_texts.add(runtime_completion.text)
         insertion_index += 1
     for runtime_completion in runtime_completions[featured_count:]:
-        if any(item.text == runtime_completion.text for item in merged):
+        if runtime_completion.text in merged_texts:
             continue
         merged.append(runtime_completion)
+        merged_texts.add(runtime_completion.text)
     return merged
 
 
