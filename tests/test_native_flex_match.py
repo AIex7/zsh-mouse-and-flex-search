@@ -176,6 +176,16 @@ class NativeFlexMatchTests(unittest.TestCase):
             self.assertEqual(actual_indices, expected_payload, query)
             self.assertEqual(actual_count, len(expected_indices), query)
             self.assertEqual(actual_results, expected_results, query)
+            self.assertEqual(
+                engine.apply_prefix_priority(
+                    query,
+                    actual_results,
+                    limit=4,
+                    current_cwd="/repo",
+                ),
+                actual_results,
+                query,
+            )
 
             serialized = engine.search_history_response_json_native(
                 query,

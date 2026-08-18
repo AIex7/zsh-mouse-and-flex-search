@@ -873,12 +873,7 @@ def run(
                 history_load_error = True
             else:
                 history_matches, initial_matched_indices, initial_matched_count = loaded
-                initial_results = apply_prefix_priority(
-                    "",
-                    history_matches,
-                    limit=MAX_RETURNED_RESULTS,
-                    current_cwd=current_cwd_text or None,
-                )
+                initial_results = history_matches
                 history_load_error = False
             last_query = ""
             last_matched_indices = initial_matched_indices
@@ -944,12 +939,8 @@ def run(
                     search_error = True
                 else:
                     history_results, matched_indices, matched_count = remote
-                resolved_results = apply_prefix_priority(
-                    query_text,
-                    history_results,
-                    limit=MAX_RETURNED_RESULTS,
-                    current_cwd=current_cwd_text or None,
-                )
+                # The daemon has already applied this ordering and limit in Rust.
+                resolved_results = history_results
                 total_count = max(len(resolved_results), matched_count or 0)
                 return matched_indices, resolved_results, matched_count, total_count, search_error
 
