@@ -24,7 +24,6 @@ class NativeFlexMatchTests(unittest.TestCase):
         self.assertIsNotNone(actual, (query, candidate))
         assert actual is not None
         self.assertEqual(actual.score, expected.score, (query, candidate))
-        self.assertEqual(actual.positions, expected.positions, (query, candidate))
 
     def test_representative_queries(self) -> None:
         for query, candidate in (
@@ -81,8 +80,8 @@ class NativeFlexMatchTests(unittest.TestCase):
             )
             self.assertEqual(actual_indices, expected_indices, query)
             self.assertEqual(
-                [(item.score, item.positions, item.text) for item in actual_results],
-                [(item.score, item.positions, item.text) for item in expected_results],
+                [(item.score, item.text) for item in actual_results],
+                [(item.score, item.text) for item in expected_results],
                 query,
             )
 

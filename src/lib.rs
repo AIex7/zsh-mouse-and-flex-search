@@ -10,68 +10,68 @@ fn compact_query(query_lower: &str) -> Vec<char> {
         .collect()
 }
 
-/// Return the existing Python flex match score and character positions.
-///
-/// All positions are Unicode character indexes, not UTF-8 byte indexes. This
-/// deliberately matches Python's `str.find` and `str[index]` behavior.
-fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<(i64, Vec<usize>)> {
+/// Return the existing Python flex match score without retaining match positions.
+fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<i64> {
     if query.is_empty() {
-        return Some((0, Vec::new()));
+        return Some(0);
     }
 
-    let lowered_characters: Vec<char> = candidate_lower.chars().collect();
-    let candidate_characters: Vec<char> = candidate.chars().collect();
-    let mut positions = Vec::with_capacity(query.len());
-    let mut search_from = 0;
-
-    for query_character in query {
-        let relative_position = lowered_characters[search_from..]
-            .iter()
-            .position(|candidate_character| candidate_character == query_character)?;
-        let position = search_from + relative_position;
-        positions.push(position);
-        search_from = position + 1;
-    }
-
+    let boundary_characters: Vec<bool> = candidate
+        .chars()
+        .map(|character| WORD_BOUNDARIES.contains(character))
+        .collect();
+    let character_count = boundary_characters.len();
+    let mut query_index = 0;
+    let mut first = 0;
+    let mut previous = 0;
     let mut contiguous = 0_i64;
     let mut gap_penalty = 0_i64;
     let mut boundary_bonus = 0_i64;
-    for (index, position) in positions.iter().copied().enumerate() {
-        if index == 0 {
+
+    for (position, candidate_character) in candidate_lower.chars().enumerate() {
+        if candidate_character != query[query_index] {
+            continue;
+        }
+        if query_index == 0 {
+            first = position;
             if position == 0 {
                 boundary_bonus += 12;
-            } else if candidate_characters
+            } else if boundary_characters
                 .get(position - 1)
-                .is_some_and(|character| WORD_BOUNDARIES.contains(*character))
+                .copied()
+                .unwrap_or(false)
             {
                 boundary_bonus += 8;
             }
-            continue;
+        } else {
+            let gap = position - previous - 1;
+            gap_penalty += (gap * 2) as i64;
+            if gap == 0 {
+                contiguous += 10;
+            }
+            if boundary_characters
+                .get(position - 1)
+                .copied()
+                .unwrap_or(false)
+            {
+                boundary_bonus += 6;
+            }
         }
 
-        let previous = positions[index - 1];
-        let gap = position - previous - 1;
-        gap_penalty += (gap * 2) as i64;
-        if gap == 0 {
-            contiguous += 10;
-        }
-        if candidate_characters
-            .get(position - 1)
-            .is_some_and(|character| WORD_BOUNDARIES.contains(*character))
-        {
-            boundary_bonus += 6;
+        previous = position;
+        query_index += 1;
+        if query_index == query.len() {
+            let span = previous - first + 1;
+            let start_bonus = (30_i64 - first as i64).max(0);
+            let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
+            return Some(
+                contiguous + boundary_bonus + start_bonus + compact_bonus
+                    - gap_penalty
+                    - (character_count / 8) as i64,
+            );
         }
     }
-
-    let first = positions[0];
-    let last = *positions.last()?;
-    let span = last - first + 1;
-    let start_bonus = (30_i64 - first as i64).max(0);
-    let compact_bonus = (20_i64 - (span - positions.len()) as i64).max(0);
-    let score = contiguous + boundary_bonus + start_bonus + compact_bonus
-        - gap_penalty
-        - (candidate_characters.len() / 8) as i64;
-    Some((score, positions))
+    None
 }
 
 struct NativeCandidate {
@@ -108,32 +108,25 @@ impl NativeCandidate {
         }
     }
 
-    fn match_flex(&self, query: &[char]) -> Option<(i64, Vec<usize>)> {
+    fn match_flex_score(&self, query: &[char]) -> Option<i64> {
         if query.is_empty() {
-            return Some((0, Vec::new()));
+            return Some(0);
         }
 
-        let mut positions = Vec::with_capacity(query.len());
         let mut query_index = 0;
+        let mut first = 0;
+        let mut previous = 0;
+        let mut contiguous = 0_i64;
+        let mut gap_penalty = 0_i64;
+        let mut boundary_bonus = 0_i64;
+
         for (position, candidate_character) in self.text_lower.chars().enumerate() {
             if candidate_character != query[query_index] {
                 continue;
             }
-            positions.push(position);
-            query_index += 1;
-            if query_index == query.len() {
-                break;
-            }
-        }
-        if query_index != query.len() {
-            return None;
-        }
 
-        let mut contiguous = 0_i64;
-        let mut gap_penalty = 0_i64;
-        let mut boundary_bonus = 0_i64;
-        for (index, position) in positions.iter().copied().enumerate() {
-            if index == 0 {
+            if query_index == 0 {
+                first = position;
                 if position == 0 {
                     boundary_bonus += 12;
                 } else if self
@@ -144,34 +137,36 @@ impl NativeCandidate {
                 {
                     boundary_bonus += 8;
                 }
-                continue;
+            } else {
+                let gap = position - previous - 1;
+                gap_penalty += (gap * 2) as i64;
+                if gap == 0 {
+                    contiguous += 10;
+                }
+                if self
+                    .boundary_characters
+                    .get(position - 1)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    boundary_bonus += 6;
+                }
             }
 
-            let previous = positions[index - 1];
-            let gap = position - previous - 1;
-            gap_penalty += (gap * 2) as i64;
-            if gap == 0 {
-                contiguous += 10;
-            }
-            if self
-                .boundary_characters
-                .get(position - 1)
-                .copied()
-                .unwrap_or(false)
-            {
-                boundary_bonus += 6;
+            previous = position;
+            query_index += 1;
+            if query_index == query.len() {
+                let span = previous - first + 1;
+                let start_bonus = (30_i64 - first as i64).max(0);
+                let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
+                return Some(
+                    contiguous + boundary_bonus + start_bonus + compact_bonus
+                        - gap_penalty
+                        - (self.character_count / 8) as i64,
+                );
             }
         }
-
-        let first = positions[0];
-        let last = *positions.last()?;
-        let span = last - first + 1;
-        let start_bonus = (30_i64 - first as i64).max(0);
-        let compact_bonus = (20_i64 - (span - positions.len()) as i64).max(0);
-        let score = contiguous + boundary_bonus + start_bonus + compact_bonus
-            - gap_penalty
-            - (self.character_count / 8) as i64;
-        Some((score, positions))
+        None
     }
 }
 
@@ -187,7 +182,6 @@ struct NativeHistory {
 struct RankedMatch {
     index: usize,
     score: i64,
-    positions: Vec<usize>,
     prefix_word_count: usize,
     words_in_order: bool,
     same_cwd: bool,
@@ -229,7 +223,7 @@ impl NativeHistory {
         py: Python<'_>,
         query_lower: &str,
         candidate_indices: Option<Vec<usize>>,
-    ) -> Vec<(usize, i64, Vec<usize>)> {
+    ) -> Vec<(usize, i64)> {
         let query = compact_query(query_lower);
         py.allow_threads(|| {
             let mut matches = Vec::new();
@@ -238,14 +232,14 @@ impl NativeHistory {
                     let Some(candidate) = self.candidates.get(index) else {
                         continue;
                     };
-                    if let Some((score, positions)) = candidate.match_flex(&query) {
-                        matches.push((index, score, positions));
+                    if let Some(score) = candidate.match_flex_score(&query) {
+                        matches.push((index, score));
                     }
                 }
             } else {
                 for (index, candidate) in self.candidates.iter().enumerate() {
-                    if let Some((score, positions)) = candidate.match_flex(&query) {
-                        matches.push((index, score, positions));
+                    if let Some(score) = candidate.match_flex_score(&query) {
+                        matches.push((index, score));
                     }
                 }
             }
@@ -265,7 +259,7 @@ impl NativeHistory {
         candidate_indices: Option<Vec<usize>>,
         limit: Option<usize>,
         max_returned_indices: usize,
-    ) -> (Vec<(usize, i64, Vec<usize>)>, Option<Vec<usize>>, usize) {
+    ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
         let query = compact_query(query_lower);
         py.allow_threads(|| {
             let mut matches = Vec::new();
@@ -281,12 +275,7 @@ impl NativeHistory {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
-                let matched = if query.is_empty() {
-                    Some((0, Vec::new()))
-                } else {
-                    candidate.match_flex(&query)
-                };
-                let Some((score, positions)) = matched else {
+                let Some(score) = candidate.match_flex_score(&query) else {
                     return;
                 };
                 if !normalized_query.is_empty() && candidate.normalized_text == normalized_query {
@@ -313,7 +302,6 @@ impl NativeHistory {
                 matches.push(RankedMatch {
                     index,
                     score,
-                    positions,
                     prefix_word_count,
                     words_in_order: words_appear_in_order(
                         &ordered_query_words,
@@ -367,7 +355,7 @@ impl NativeHistory {
                         if !seen.insert(text) {
                             continue;
                         }
-                        selected.push((matched.index, matched.score, matched.positions.clone()));
+                        selected.push((matched.index, matched.score));
                         if selected.len() >= result_limit {
                             break 'buckets;
                         }
@@ -380,11 +368,7 @@ impl NativeHistory {
 }
 
 #[pyfunction]
-fn flex_match(
-    query_lower: &str,
-    candidate: &str,
-    candidate_lower: &str,
-) -> Option<(i64, Vec<usize>)> {
+fn flex_match(query_lower: &str, candidate: &str, candidate_lower: &str) -> Option<i64> {
     match_flex(&compact_query(query_lower), candidate, candidate_lower)
 }
 

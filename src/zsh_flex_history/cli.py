@@ -412,7 +412,6 @@ def draw_panel(
         cache_key = (
             item.text,
             item.text_lower,
-            tuple(item.positions),
             item.runtime_completion,
             item.failed,
             is_selected,

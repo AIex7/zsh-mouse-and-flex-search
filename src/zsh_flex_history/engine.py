@@ -22,7 +22,7 @@ import unicodedata
 from argparse import SUPPRESS, ArgumentParser
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, List, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 try:
     from ._flex_match import NativeHistory as _NativeHistory
@@ -85,7 +85,6 @@ DORIC = {
 class MatchResult:
     text: str
     score: int
-    positions: List[int]
     exact: bool = False
     recency: int = 0
     cwd: Optional[str] = None
@@ -772,54 +771,45 @@ def filter_exact_query_match(query: str, results: list[MatchResult]) -> list[Mat
 
 def _python_flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
     if not query:
-        return MatchResult(candidate, 0, [], text_lower=candidate_lower or candidate.lower())
+        return MatchResult(candidate, 0, text_lower=candidate_lower or candidate.lower())
 
     q = "".join(ch for ch in query.lower() if not ch.isspace())
     c = candidate_lower if candidate_lower is not None else candidate.lower()
     if not q:
-        return MatchResult(candidate, 0, [], text_lower=c)
+        return MatchResult(candidate, 0, text_lower=c)
 
-    positions: list[int] = []
     at = 0
-    for ch in q:
-        idx = c.find(ch, at)
-        if idx == -1:
-            return None
-        positions.append(idx)
-        at = idx + 1
-
-    # Approximate Emacs flex behavior: in-order match with strong preference
-    # for contiguous runs, token boundaries, and earlier starts.
-    score = 0
+    first = 0
+    previous = 0
     contiguous = 0
     gap_penalty = 0
     boundary_bonus = 0
-
-    for i, pos in enumerate(positions):
+    for i, ch in enumerate(q):
+        pos = c.find(ch, at)
+        if pos == -1:
+            return None
         if i == 0:
+            first = pos
             if pos == 0:
                 boundary_bonus += 12
             elif pos > 0 and candidate[pos - 1] in " _-/.:":
                 boundary_bonus += 8
-            continue
+        else:
+            gap = pos - previous - 1
+            gap_penalty += gap * 2
+            if gap == 0:
+                contiguous += 10
+            if candidate[pos - 1] in " _-/.:":
+                boundary_bonus += 6
+        previous = pos
+        at = pos + 1
 
-        prev = positions[i - 1]
-        gap = pos - prev - 1
-        gap_penalty += gap * 2
-        if gap == 0:
-            contiguous += 10
-        if candidate[pos - 1] in " _-/.:":
-            boundary_bonus += 6
-
-    span = positions[-1] - positions[0] + 1
-    start_bonus = max(0, 30 - positions[0])
+    span = previous - first + 1
+    start_bonus = max(0, 30 - first)
     compact_bonus = max(0, 20 - (span - len(q)))
-
-    score += contiguous + boundary_bonus + start_bonus + compact_bonus
-    score -= gap_penalty
-    score -= len(candidate) // 8
-
-    return MatchResult(candidate, score, positions, text_lower=c)
+    score = contiguous + boundary_bonus + start_bonus + compact_bonus
+    score -= gap_penalty + len(candidate) // 8
+    return MatchResult(candidate, score, text_lower=c)
 
 
 def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = None) -> Optional[MatchResult]:
@@ -829,8 +819,7 @@ def flex_match(query: str, candidate: str, *, candidate_lower: Optional[str] = N
         matched = _native_flex_match(query.lower(), candidate, c)
         if matched is None:
             return None
-        score, positions = matched
-        return MatchResult(candidate, score, positions, text_lower=c)
+        return MatchResult(candidate, matched, text_lower=c)
     return _python_flex_match(query, candidate, candidate_lower=c)
 
 
@@ -1112,17 +1101,10 @@ def runtime_completion_matches(
             continue
 
         completed_query_lower = completed_query.lower()
-        # Match the shell-rendered token, including backslashes. Matching the
-        # unescaped path shifts every later highlight when a space or another
-        # escaped character appears before it.
-        display_match = flex_match(raw_token, completed_token, candidate_lower=completed_token.lower())
-        completed_positions = [start + pos for pos in display_match.positions] if display_match is not None else []
-
         runtime_matches.append(
             MatchResult(
                 text=completed_query,
                 score=10**9,
-                positions=completed_positions,
                 text_lower=completed_query_lower,
                 runtime_completion=True,
             )
@@ -1226,13 +1208,12 @@ def search_history_ranked_native(
         MAX_CACHED_CANDIDATE_INDICES,
     )
     results: list[MatchResult] = []
-    for idx, score, positions in selected:
+    for idx, score in selected:
         entry = history[idx]
         results.append(
             MatchResult(
                 entry.text,
                 score,
-                positions,
                 exact=False,
                 recency=-idx,
                 cwd=entry.cwd,
@@ -1272,7 +1253,6 @@ def search_history_only(
                 MatchResult(
                     entry.text,
                     0,
-                    [],
                     exact=False,
                     recency=-idx,
                     cwd=entry.cwd,
@@ -1292,7 +1272,7 @@ def search_history_only(
         and len(native_candidates) == len(history)
     ):
         native_matches = native_candidates.flex_match_many(query.lower(), candidate_indices)
-        for idx, score, positions in native_matches:
+        for idx, score in native_matches:
             entry = history[idx]
             cmd = entry.text
             if query_equals_candidate(query, cmd):
@@ -1302,7 +1282,6 @@ def search_history_only(
                 MatchResult(
                     cmd,
                     score,
-                    positions,
                     exact=False,
                     recency=-idx,
                     cwd=entry.cwd,
@@ -1353,20 +1332,18 @@ def prefer_current_cwd(
     return same_cwd + other
 
 
-def ordered_query_word_positions(query: str, text_lower: str) -> Optional[list[int]]:
+def query_words_appear_in_order(query: str, text_lower: str) -> bool:
     words = query.lower().split()
     if not words:
-        return None
+        return False
 
     at = 0
-    positions: list[int] = []
     for word in words:
         idx = text_lower.find(word, at)
         if idx == -1:
-            return None
-        positions.extend(range(idx, idx + len(word)))
+            return False
         at = idx + len(word)
-    return positions
+    return True
 
 
 def apply_inner_bucket_priority(
@@ -1379,7 +1356,7 @@ def apply_inner_bucket_priority(
     rest: list[MatchResult] = []
     for item in results:
         text_lower = item.text_lower if item.text_lower is not None else item.text.lower()
-        if ordered_query_word_positions(query, text_lower) is not None:
+        if query_words_appear_in_order(query, text_lower):
             words_in_order.append(item)
         else:
             rest.append(item)
@@ -1473,7 +1450,6 @@ def match_result_to_payload(item: MatchResult) -> dict[str, Any]:
     return {
         "text": item.text,
         "score": item.score,
-        "positions": item.positions,
         "exact": item.exact,
         "recency": item.recency,
         "cwd": item.cwd,
@@ -1487,27 +1463,20 @@ def match_result_from_payload(payload: object) -> Optional[MatchResult]:
         return None
     text = payload.get("text")
     score = payload.get("score")
-    positions = payload.get("positions")
     exact = payload.get("exact", False)
     recency = payload.get("recency", 0)
     cwd = payload.get("cwd")
     failed = payload.get("failed", False)
     words = payload.get("words", [])
-    if not isinstance(text, str) or not isinstance(score, int) or not isinstance(positions, list):
+    if not isinstance(text, str) or not isinstance(score, int):
         return None
     if cwd is not None and not isinstance(cwd, str):
         return None
     if not isinstance(words, list) or not all(isinstance(word, str) for word in words):
         return None
-    parsed_positions: list[int] = []
-    for pos in positions:
-        if not isinstance(pos, int):
-            return None
-        parsed_positions.append(pos)
     return MatchResult(
         text=text,
         score=score,
-        positions=parsed_positions,
         exact=bool(exact),
         recency=int(recency) if isinstance(recency, int) else 0,
         cwd=cwd,
