@@ -3,6 +3,10 @@ use std::collections::HashSet;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
 
+fn is_word_boundary_byte(byte: u8) -> bool {
+    matches!(byte, b' ' | b'_' | b'-' | b'/' | b'.' | b':')
+}
+
 fn compact_query(query_lower: &str) -> Vec<char> {
     query_lower
         .chars()
@@ -10,8 +14,74 @@ fn compact_query(query_lower: &str) -> Vec<char> {
         .collect()
 }
 
+fn ascii_query(query: &[char]) -> Option<Vec<u8>> {
+    query
+        .iter()
+        .map(|character| u8::try_from(*character as u32).ok())
+        .collect()
+}
+
+fn match_flex_ascii(query: &[u8], candidate: &[u8], candidate_lower: &[u8]) -> Option<i64> {
+    if query.is_empty() {
+        return Some(0);
+    }
+
+    let mut query_index = 0;
+    let mut first = 0;
+    let mut previous = 0;
+    let mut contiguous = 0_i64;
+    let mut gap_penalty = 0_i64;
+    let mut boundary_bonus = 0_i64;
+
+    for (position, candidate_character) in candidate_lower.iter().copied().enumerate() {
+        if candidate_character != query[query_index] {
+            continue;
+        }
+        if query_index == 0 {
+            first = position;
+            if position == 0 {
+                boundary_bonus += 12;
+            } else if is_word_boundary_byte(candidate[position - 1]) {
+                boundary_bonus += 8;
+            }
+        } else {
+            let gap = position - previous - 1;
+            gap_penalty += (gap * 2) as i64;
+            if gap == 0 {
+                contiguous += 10;
+            }
+            if is_word_boundary_byte(candidate[position - 1]) {
+                boundary_bonus += 6;
+            }
+        }
+
+        previous = position;
+        query_index += 1;
+        if query_index == query.len() {
+            let span = previous - first + 1;
+            let start_bonus = (30_i64 - first as i64).max(0);
+            let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
+            return Some(
+                contiguous + boundary_bonus + start_bonus + compact_bonus
+                    - gap_penalty
+                    - (candidate.len() / 8) as i64,
+            );
+        }
+    }
+    None
+}
+
 /// Return the existing Python flex match score without retaining match positions.
 fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<i64> {
+    if candidate.is_ascii() && candidate_lower.is_ascii() {
+        if let Some(query_ascii) = ascii_query(query) {
+            return match_flex_ascii(
+                &query_ascii,
+                candidate.as_bytes(),
+                candidate_lower.as_bytes(),
+            );
+        }
+    }
     if query.is_empty() {
         return Some(0);
     }
@@ -80,6 +150,7 @@ struct NativeCandidate {
     normalized_text: String,
     cwd: Option<String>,
     words: Vec<String>,
+    ascii: bool,
     boundary_characters: Vec<bool>,
     character_count: usize,
 }
@@ -92,23 +163,41 @@ impl NativeCandidate {
         cwd: Option<String>,
         words: Vec<String>,
     ) -> Self {
-        let boundary_characters = text
-            .chars()
-            .map(|character| WORD_BOUNDARIES.contains(character))
-            .collect();
-        let character_count = text.chars().count();
+        let ascii = text.is_ascii() && text_lower.is_ascii();
+        let boundary_characters = if ascii {
+            Vec::new()
+        } else {
+            text.chars()
+                .map(|character| WORD_BOUNDARIES.contains(character))
+                .collect()
+        };
+        let character_count = if ascii {
+            text.len()
+        } else {
+            text.chars().count()
+        };
         Self {
             text,
             text_lower,
             normalized_text,
             cwd,
             words,
+            ascii,
             boundary_characters,
             character_count,
         }
     }
 
-    fn match_flex_score(&self, query: &[char]) -> Option<i64> {
+    fn match_flex_score(&self, query: &[char], query_ascii: Option<&[u8]>) -> Option<i64> {
+        if self.ascii {
+            if let Some(query_ascii) = query_ascii {
+                return match_flex_ascii(
+                    query_ascii,
+                    self.text.as_bytes(),
+                    self.text_lower.as_bytes(),
+                );
+            }
+        }
         if query.is_empty() {
             return Some(0);
         }
@@ -225,6 +314,7 @@ impl NativeHistory {
         candidate_indices: Option<Vec<usize>>,
     ) -> Vec<(usize, i64)> {
         let query = compact_query(query_lower);
+        let query_ascii = ascii_query(&query);
         py.allow_threads(|| {
             let mut matches = Vec::new();
             if let Some(indices) = candidate_indices.as_deref() {
@@ -232,13 +322,15 @@ impl NativeHistory {
                     let Some(candidate) = self.candidates.get(index) else {
                         continue;
                     };
-                    if let Some(score) = candidate.match_flex_score(&query) {
+                    if let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref())
+                    {
                         matches.push((index, score));
                     }
                 }
             } else {
                 for (index, candidate) in self.candidates.iter().enumerate() {
-                    if let Some(score) = candidate.match_flex_score(&query) {
+                    if let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref())
+                    {
                         matches.push((index, score));
                     }
                 }
@@ -261,6 +353,7 @@ impl NativeHistory {
         max_returned_indices: usize,
     ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
         let query = compact_query(query_lower);
+        let query_ascii = ascii_query(&query);
         py.allow_threads(|| {
             let mut matches = Vec::new();
             let mut matched_indices = if query_lower.is_empty() {
@@ -275,7 +368,7 @@ impl NativeHistory {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
-                let Some(score) = candidate.match_flex_score(&query) else {
+                let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
                     return;
                 };
                 if !normalized_query.is_empty() && candidate.normalized_text == normalized_query {
