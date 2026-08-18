@@ -846,44 +846,35 @@ impl NativeHistory {
                 }
             }
 
-            let prefix_tiers = if max_prefix_word_count > 0 { 2 } else { 1 };
             let result_limit = limit.unwrap_or(usize::MAX);
             let mut selected = Vec::with_capacity(result_limit.min(matches.len()));
             let mut seen = HashSet::new();
-            'buckets: for prefix_tier in 0..prefix_tiers {
-                for inner_bucket in 0..4 {
-                    for matched in &matches {
-                        let matched_prefix_tier = if max_prefix_word_count > 0
-                            && matched.prefix_word_count == max_prefix_word_count
-                        {
-                            0
-                        } else if max_prefix_word_count > 0 {
-                            1
-                        } else {
-                            0
-                        };
-                        let matched_inner_bucket = match (
-                            matched.ranking_flags & WORDS_IN_ORDER != 0,
-                            matched.ranking_flags & SAME_CWD != 0,
-                        ) {
-                            (true, true) => 0,
-                            (true, false) => 1,
-                            (false, true) => 2,
-                            (false, false) => 3,
-                        };
-                        if matched_prefix_tier != prefix_tier
-                            || matched_inner_bucket != inner_bucket
-                        {
-                            continue;
-                        }
-                        let text = self.candidates[matched.index].text.as_str();
-                        if !seen.insert(text) {
-                            continue;
-                        }
-                        selected.push((matched.index, matched.score));
-                        if selected.len() >= result_limit {
-                            break 'buckets;
-                        }
+            let mut buckets: [Vec<RankedMatch>; 8] = std::array::from_fn(|_| Vec::new());
+            for matched in matches {
+                let prefix_tier = usize::from(
+                    max_prefix_word_count > 0 && matched.prefix_word_count != max_prefix_word_count,
+                );
+                let inner_bucket = match (
+                    matched.ranking_flags & WORDS_IN_ORDER != 0,
+                    matched.ranking_flags & SAME_CWD != 0,
+                ) {
+                    (true, true) => 0,
+                    (true, false) => 1,
+                    (false, true) => 2,
+                    (false, false) => 3,
+                };
+                buckets[prefix_tier * 4 + inner_bucket].push(matched);
+            }
+
+            'buckets: for bucket in &buckets {
+                for matched in bucket {
+                    let text = self.candidates[matched.index].text.as_str();
+                    if !seen.insert(text) {
+                        continue;
+                    }
+                    selected.push((matched.index, matched.score));
+                    if selected.len() >= result_limit {
+                        break 'buckets;
                     }
                 }
             }

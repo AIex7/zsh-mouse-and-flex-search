@@ -8,8 +8,8 @@ Run from the repository root:
 Each invocation benchmarks both a fixed-seed corpus and a fresh random-seed
 corpus. It combines common shell commands, synthetic project paths,
 random-looking identifiers, varying command lengths, and occasional long
-command lines. Only calls to ``engine.search`` are timed; corpus construction
-is deliberately excluded.
+command lines. Only native matching and ranking calls are timed; corpus and
+Rust-owned candidate-cache construction are deliberately excluded.
 """
 
 from __future__ import annotations
@@ -23,19 +23,19 @@ import sys
 import time
 from string import ascii_lowercase
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from zsh_flex_history import engine
 from zsh_flex_history.engine import (
     HistoryEntry,
+    build_native_history_candidates,
     default_custom_history_path,
     make_history_entry,
     normalize_cwd_value,
-    search,
+    search_history_ranked_native,
 )
 
 
@@ -72,23 +72,18 @@ VERBS = ("build", "check", "deploy", "format", "lint", "migrate", "serve", "test
 TARGETS = ("api", "backend", "cli", "docs", "frontend", "worker")
 
 
-CharacterPresenceIndex = Optional[dict[str, bytearray]]
-
-
-def build_optional_character_presence_index(history: list[HistoryEntry]) -> CharacterPresenceIndex:
-    """Use the index when this revision provides it; otherwise use old search."""
-    builder = getattr(engine, "build_character_presence_index", None)
-    return builder(history) if builder is not None else None
-
-
 def benchmark_search(
     query: str,
     history: list[HistoryEntry],
-    character_presence_index: CharacterPresenceIndex,
+    native_candidates: Any,
 ) -> tuple[list[object], object]:
-    if character_presence_index is None:
-        return search(query, history, limit=100)
-    return search(query, history, limit=100, character_presence_index=character_presence_index)
+    results, matched_indices, _ = search_history_ranked_native(
+        query,
+        history,
+        native_candidates,
+        limit=100,
+    )
+    return results, matched_indices
 
 
 def synthetic_command(index: int, rng: random.Random) -> str:
@@ -125,13 +120,13 @@ def repetitions_for(size: int) -> int:
 
 def benchmark(
     history: list[HistoryEntry],
-    character_presence_index: CharacterPresenceIndex,
+    native_candidates: Any,
     queries: tuple[str, ...],
     repetitions: int,
 ) -> tuple[float, int]:
     # Warm caches and validate that every query produces a normal result list.
     for query in queries:
-        results, _ = benchmark_search(query, history, character_presence_index)
+        results, _ = benchmark_search(query, history, native_candidates)
         assert isinstance(results, list)
 
     samples: list[float] = []
@@ -139,7 +134,7 @@ def benchmark(
     for _ in range(repetitions):
         started = time.perf_counter()
         for query in queries:
-            results, _ = benchmark_search(query, history, character_presence_index)
+            results, _ = benchmark_search(query, history, native_candidates)
             result_count += len(results)
         samples.append(time.perf_counter() - started)
     return statistics.median(samples) * 1_000 / len(queries), result_count
@@ -147,7 +142,7 @@ def benchmark(
 
 def snapshot_results(
     history: list[HistoryEntry],
-    character_presence_index: CharacterPresenceIndex,
+    native_candidates: Any,
     seed: int,
 ) -> dict[str, object]:
     return {
@@ -158,7 +153,7 @@ def snapshot_results(
                 "query": query,
                 "results": [
                     item.text
-                    for item in benchmark_search(query, history, character_presence_index)[0]
+                    for item in benchmark_search(query, history, native_candidates)[0]
                 ],
             }
             for query in SNAPSHOT_QUERIES
@@ -189,22 +184,24 @@ def compare_fixed_snapshots(snapshot: dict[str, object], current_path: Path) -> 
     return sorted(differences)
 
 
-def benchmark_run(label: str, seed: int) -> list[HistoryEntry]:
+def benchmark_run(label: str, seed: int) -> tuple[list[HistoryEntry], Any]:
     letters = ", ".join(SINGLE_LETTER_QUERIES)
     print(f"\n{label} seed: {seed}")
     print(f"Single-letter sample: {letters}")
     print("entries  multiword ms/search  single-letter ms/search  repetitions")
     largest_history: list[HistoryEntry] = []
+    largest_native_candidates: Any = None
     for size in SIZES:
         history = build_history(size, seed)
-        character_presence_index = build_optional_character_presence_index(history)
+        native_candidates = build_native_history_candidates(history)
         repetitions = repetitions_for(size)
-        multiword_ms, _ = benchmark(history, character_presence_index, QUERIES, repetitions)
-        single_letter_ms, _ = benchmark(history, character_presence_index, SINGLE_LETTER_QUERIES, repetitions)
+        multiword_ms, _ = benchmark(history, native_candidates, QUERIES, repetitions)
+        single_letter_ms, _ = benchmark(history, native_candidates, SINGLE_LETTER_QUERIES, repetitions)
         print(f"{size:>7,}  {multiword_ms:>19.2f}  {single_letter_ms:>23.2f}  {repetitions:>11}")
         if size == SNAPSHOT_SIZE:
             largest_history = history
-    return largest_history
+            largest_native_candidates = native_candidates
+    return largest_history, largest_native_candidates
 
 
 def load_real_history_read_only(path: Path) -> list[HistoryEntry]:
@@ -247,10 +244,10 @@ def benchmark_real_history() -> None:
         print(f"\nReal custom-history benchmark skipped: no readable entries at {path}")
         return
 
-    character_presence_index = build_optional_character_presence_index(history)
+    native_candidates = build_native_history_candidates(history)
     repetitions = repetitions_for(len(history))
-    multiword_ms, _ = benchmark(history, character_presence_index, QUERIES, repetitions)
-    single_letter_ms, _ = benchmark(history, character_presence_index, SINGLE_LETTER_QUERIES, repetitions)
+    multiword_ms, _ = benchmark(history, native_candidates, QUERIES, repetitions)
+    single_letter_ms, _ = benchmark(history, native_candidates, SINGLE_LETTER_QUERIES, repetitions)
     print("\nReal custom-history (SQLite read-only; no daemon)")
     print(f"database: {path}")
     print(f"entries: {len(history):,}; repetitions: {repetitions}")
@@ -259,10 +256,10 @@ def benchmark_real_history() -> None:
 
 
 def main() -> int:
-    fixed_history = benchmark_run("Fixed", FIXED_SEED)
+    fixed_history, fixed_native_candidates = benchmark_run("Fixed", FIXED_SEED)
     snapshot = snapshot_results(
         fixed_history,
-        build_optional_character_presence_index(fixed_history),
+        fixed_native_candidates,
         FIXED_SEED,
     )
     snapshot_path = write_fixed_snapshot(snapshot)
