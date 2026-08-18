@@ -32,7 +32,7 @@ Optionally, to import your existing Zsh history into the custom SQLite history d
 ## Env Variables
 
 - `ZSH_FLEX_HISTORY_EMPTY_SPACE_COMMAND`
-  - When set to a non-empty command, pressing Space with an empty query accepts and runs that command immediately.
+  - Pressing Space with an empty query accepts and runs that command immediately. For example, "emacs ."
   - The command is never added to custom history.
 - `ZSH_FLEX_HISTORY_COLOR`
   - Sets the ANSI color used for normal history results.
