@@ -9,6 +9,11 @@ import re
 import shutil
 from typing import Optional
 
+try:
+    from ._flex_match import NativeIncrementalHighlighter as _NativeIncrementalHighlighter
+except ImportError:
+    _NativeIncrementalHighlighter = None
+
 
 ANSI_STYLE_BY_TOKEN = {
     "default": "",
@@ -22,6 +27,20 @@ ANSI_STYLE_BY_TOKEN = {
     "assignment": "",           # default
     "error": "",                # default (no special error coloring)
 }
+
+TOKEN_NAMES = (
+    "default",
+    "command",
+    "keyword",
+    "option",
+    "string",
+    "variable",
+    "operator",
+    "comment",
+    "assignment",
+    "error",
+)
+ANSI_STYLE_BY_TOKEN_ID = tuple(ANSI_STYLE_BY_TOKEN[name] for name in TOKEN_NAMES)
 
 
 KEYWORDS = {
@@ -158,12 +177,26 @@ BUILTINS = {
 }
 
 
-def ansi_for_token(token: str) -> str:
+def ansi_for_token(token: str | int) -> str:
+    if isinstance(token, int):
+        if 0 <= token < len(ANSI_STYLE_BY_TOKEN_ID):
+            return ANSI_STYLE_BY_TOKEN_ID[token]
+        return ""
     return ANSI_STYLE_BY_TOKEN.get(token, "")
 
 
-def highlight_tokens(query: str) -> list[str]:
+def highlight_tokens(query: str) -> list[str] | bytes:
     """Highlight a complete command line without retaining editor state."""
+    if _NativeIncrementalHighlighter is not None:
+        try:
+            return _NativeIncrementalHighlighter().highlight(query, _command_state)
+        except Exception:
+            pass
+    return python_highlight_tokens(query)
+
+
+def python_highlight_tokens(query: str) -> list[str]:
+    """Original Python highlighter, retained as the native fallback."""
     tokens = ["default"] * len(query)
     if not query:
         return tokens
@@ -262,7 +295,7 @@ def _highlight_from(
             states[i] = expect_command
 
 
-class IncrementalHighlighter:
+class PythonIncrementalHighlighter:
     """Retains syntax tokens across edits to avoid re-lexing unchanged prefixes."""
 
     def __init__(self) -> None:
@@ -349,6 +382,36 @@ class IncrementalHighlighter:
                 return i
             i -= 1
         return segment_start
+
+
+class IncrementalHighlighter:
+    """Use the Rust incremental lexer when available, with the original fallback."""
+
+    def __init__(self) -> None:
+        self._native = (
+            _NativeIncrementalHighlighter() if _NativeIncrementalHighlighter is not None else None
+        )
+        self._python: Optional[PythonIncrementalHighlighter] = None
+        self._query: Optional[str] = None
+        self._tokens: list[str] | bytes = []
+
+    def highlight(self, query: str) -> list[str] | bytes:
+        if query == self._query:
+            return self._tokens
+        if self._native is not None:
+            try:
+                tokens = self._native.highlight(query, _command_state)
+                self._query = query
+                self._tokens = tokens
+                return tokens
+            except Exception:
+                self._native = None
+        if self._python is None:
+            self._python = PythonIncrementalHighlighter()
+        tokens = self._python.highlight(query)
+        self._query = query
+        self._tokens = tokens
+        return tokens
 
 
 def _mark(tokens: list[str], start: int, end: int, kind: str) -> None:

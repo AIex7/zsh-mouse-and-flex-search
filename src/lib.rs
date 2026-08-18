@@ -9,6 +9,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
 
+mod syntax_highlighting;
+
 const WORD_BOUNDARIES: &str = " _-/.:";
 const MAX_DAEMON_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -957,6 +959,7 @@ fn search_daemon(
 
 #[pymodule]
 fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    syntax_highlighting::register(module)?;
     module.add_class::<NativeHistory>()?;
     module.add_class::<NativeDaemonServer>()?;
     module.add_class::<NativeSearchRequest>()?;
