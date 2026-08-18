@@ -133,7 +133,14 @@ def build_query_visual_rows(
         buf.append(ch)
         buf_width += ch_width
         i += 1
+    final_width = first_width if not rows else following_width
     rows.append(QueryVisualRow(start=start, end=len(query), text="".join(buf), display_width=buf_width))
+    if query and buf_width == final_width:
+        # Once the last character occupies the terminal's final available
+        # column, the insertion cursor is physically at column one of the
+        # following row. Represent that row explicitly so cursor rendering
+        # does not depend on the terminal's pending-wrap state.
+        rows.append(QueryVisualRow(start=len(query), end=len(query), text="", display_width=0))
     return rows
 
 
