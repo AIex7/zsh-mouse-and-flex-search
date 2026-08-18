@@ -1,13 +1,16 @@
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
+const MAX_DAEMON_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 fn is_word_boundary_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'_' | b'-' | b'/' | b'.' | b':')
@@ -434,8 +437,6 @@ fn daemon_exchange_bytes(
     request: &[u8],
     timeout: Duration,
 ) -> Option<Vec<u8>> {
-    const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
-
     let mut stream = UnixStream::connect(socket_path).ok()?;
     stream.set_read_timeout(Some(timeout)).ok()?;
     stream.set_write_timeout(Some(timeout)).ok()?;
@@ -450,14 +451,14 @@ fn daemon_exchange_bytes(
         }
         let chunk = &buffer[..count];
         if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
-            if response.len() + newline > MAX_RESPONSE_BYTES {
+            if response.len() + newline > MAX_DAEMON_MESSAGE_BYTES {
                 return None;
             }
             response.extend_from_slice(&chunk[..newline]);
             break;
         }
         response.extend_from_slice(chunk);
-        if response.len() > MAX_RESPONSE_BYTES {
+        if response.len() > MAX_DAEMON_MESSAGE_BYTES {
             return None;
         }
     }
@@ -474,6 +475,198 @@ fn daemon_exchange_bytes(
     }
     response.truncate(end - start);
     Some(response)
+}
+
+fn read_daemon_message(stream: &mut UnixStream) -> Option<Vec<u8>> {
+    let mut message = Vec::new();
+    let mut buffer = [0_u8; 65_536];
+    loop {
+        let count = stream.read(&mut buffer).ok()?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
+            if message.len() + newline > MAX_DAEMON_MESSAGE_BYTES {
+                return None;
+            }
+            message.extend_from_slice(&chunk[..newline]);
+            break;
+        }
+        message.extend_from_slice(chunk);
+        if message.len() > MAX_DAEMON_MESSAGE_BYTES {
+            return None;
+        }
+    }
+    let start = message
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let end = message
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())?
+        + 1;
+    Some(message[start..end].to_vec())
+}
+
+fn write_daemon_message(stream: &mut UnixStream, payload: &[u8]) -> bool {
+    stream.write_all(payload).is_ok() && stream.write_all(b"\n").is_ok()
+}
+
+fn json_value_as_python_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".to_owned(),
+        serde_json::Value::Bool(true) => "True".to_owned(),
+        serde_json::Value::Bool(false) => "False".to_owned(),
+        serde_json::Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+struct AcceptedSearchRequest {
+    stream: UnixStream,
+    query: String,
+    candidate_indices: Option<Vec<usize>>,
+    limit: Option<i64>,
+    cwd: Option<String>,
+}
+
+#[pyclass]
+struct NativeSearchRequest {
+    stream: Option<UnixStream>,
+    query: String,
+    candidate_indices: Option<Vec<usize>>,
+    limit: Option<i64>,
+    cwd: Option<String>,
+}
+
+#[pymethods]
+impl NativeSearchRequest {
+    #[getter]
+    fn query(&self) -> &str {
+        &self.query
+    }
+
+    #[getter]
+    fn candidate_indices(&self) -> Option<Vec<usize>> {
+        self.candidate_indices.clone()
+    }
+
+    #[getter]
+    fn limit(&self) -> Option<i64> {
+        self.limit
+    }
+
+    #[getter]
+    fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    fn respond_serialized(&mut self, payload: &str) -> bool {
+        self.stream
+            .take()
+            .is_some_and(|mut stream| write_daemon_message(&mut stream, payload.as_bytes()))
+    }
+}
+
+#[pyclass]
+struct NativeDaemonServer {
+    listener: UnixListener,
+}
+
+impl NativeDaemonServer {
+    fn accept_search_request(&self) -> std::io::Result<AcceptedSearchRequest> {
+        loop {
+            let (mut stream, _) = self.listener.accept()?;
+            let Some(raw) = read_daemon_message(&mut stream) else {
+                write_daemon_message(
+                    &mut stream,
+                    br#"{"ok":false,"error":"invalid request"}"#,
+                );
+                continue;
+            };
+            let Ok(serde_json::Value::Object(request)) = serde_json::from_slice(&raw) else {
+                write_daemon_message(
+                    &mut stream,
+                    br#"{"ok":false,"error":"invalid request"}"#,
+                );
+                continue;
+            };
+            let action = request.get("action").and_then(serde_json::Value::as_str);
+            if action == Some("ping") {
+                write_daemon_message(&mut stream, br#"{"ok":true}"#);
+                continue;
+            }
+            if action != Some("search_history") {
+                write_daemon_message(
+                    &mut stream,
+                    br#"{"ok":false,"error":"unknown action"}"#,
+                );
+                continue;
+            }
+
+            let query = request
+                .get("query")
+                .map_or_else(String::new, json_value_as_python_string);
+            let candidate_indices = request.get("candidate_indices").and_then(|value| {
+                value.as_array().map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| match value {
+                            serde_json::Value::Bool(value) => Some(usize::from(*value)),
+                            _ => value
+                                .as_i64()
+                                .and_then(|index| usize::try_from(index).ok()),
+                        })
+                        .collect()
+                })
+            });
+            let limit = request.get("limit").and_then(|value| match value {
+                serde_json::Value::Bool(value) => Some(i64::from(*value)),
+                _ => value.as_i64(),
+            });
+            let cwd = request
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            return Ok(AcceptedSearchRequest {
+                stream,
+                query,
+                candidate_indices,
+                limit,
+                cwd,
+            });
+        }
+    }
+}
+
+#[pymethods]
+impl NativeDaemonServer {
+    #[new]
+    fn new(socket_path: &str) -> PyResult<Self> {
+        let listener = UnixListener::bind(socket_path).map_err(PyOSError::new_err)?;
+        if let Err(error) = fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600)) {
+            drop(listener);
+            let _ = fs::remove_file(socket_path);
+            return Err(PyOSError::new_err(error));
+        }
+        Ok(Self { listener })
+    }
+
+    fn accept_search(&self, py: Python<'_>) -> PyResult<Py<NativeSearchRequest>> {
+        let request = py
+            .allow_threads(|| self.accept_search_request())
+            .map_err(PyOSError::new_err)?;
+        Py::new(
+            py,
+            NativeSearchRequest {
+                stream: Some(request.stream),
+                query: request.query,
+                candidate_indices: request.candidate_indices,
+                limit: request.limit,
+                cwd: request.cwd,
+            },
+        )
+    }
 }
 
 fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
@@ -765,6 +958,8 @@ fn search_daemon(
 #[pymodule]
 fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeHistory>()?;
+    module.add_class::<NativeDaemonServer>()?;
+    module.add_class::<NativeSearchRequest>()?;
     module.add_function(wrap_pyfunction!(flex_match, module)?)?;
     module.add_function(wrap_pyfunction!(parse_search_response, module)?)?;
     module.add_function(wrap_pyfunction!(serialize_search_request, module)?)?;

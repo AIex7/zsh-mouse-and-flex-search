@@ -25,12 +25,14 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 try:
+    from ._flex_match import NativeDaemonServer as _NativeDaemonServer
     from ._flex_match import NativeHistory as _NativeHistory
     from ._flex_match import flex_match as _native_flex_match
     from ._flex_match import parse_search_response as _native_parse_search_response
     from ._flex_match import search_daemon as _native_search_daemon
     from ._flex_match import serialize_search_request as _native_serialize_search_request
 except ImportError:
+    _NativeDaemonServer = None
     _NativeHistory = None
     _native_flex_match = None
     _native_parse_search_response = None
@@ -1876,6 +1878,63 @@ def daemon_write_serialized_response(conn: socket.socket, payload: str) -> None:
         return
 
 
+def daemon_search_response_serialized(
+    query: str,
+    history: list[HistoryEntry],
+    native_history_candidates: Optional[Any],
+    *,
+    candidate_indices: Optional[Sequence[int]],
+    limit: Optional[int],
+    current_cwd: Optional[str],
+) -> str:
+    native_response = search_history_response_json_native(
+        query,
+        history,
+        native_history_candidates,
+        candidate_indices=candidate_indices,
+        limit=limit,
+        current_cwd=current_cwd,
+    )
+    if native_response is not None:
+        return native_response
+
+    native_ranked = search_history_ranked_native(
+        query,
+        history,
+        native_history_candidates,
+        candidate_indices=candidate_indices,
+        limit=limit,
+        current_cwd=current_cwd,
+    )
+    if native_ranked is not None:
+        history_results, indices_payload, matched_count = native_ranked
+    else:
+        history_results_all, matched_indices = search_history_only(
+            query,
+            history,
+            candidate_indices=candidate_indices,
+            limit=None,
+        )
+        history_results = apply_prefix_priority(
+            query,
+            history_results_all,
+            limit=limit,
+            current_cwd=current_cwd,
+        )
+        matched_count = len(matched_indices)
+        indices_payload = daemon_matched_indices_payload(query, matched_indices)
+    return json.dumps(
+        {
+            "ok": True,
+            "history_results": [match_result_to_payload(item) for item in history_results],
+            "matched_indices": indices_payload,
+            "matched_indices_omitted": indices_payload is None,
+            "matched_count": matched_count,
+        },
+        separators=(",", ":"),
+    )
+
+
 def run_history_daemon(
     history_path: Path,
     socket_path: Path,
@@ -1914,6 +1973,51 @@ def run_history_daemon(
             daemon_debug_log(debug, f"removed stale socket at {socket_path}")
         except OSError:
             pass
+
+    if _NativeDaemonServer is not None:
+        try:
+            native_server = _NativeDaemonServer(str(socket_path))
+        except OSError as exc:
+            print(f"zsh_flex_history daemon: failed to bind socket: {exc}", file=sys.stderr)
+            return 1
+        daemon_debug_log(debug, f"daemon listening on {socket_path} (history={history_path})")
+        try:
+            while True:
+                try:
+                    request = native_server.accept_search()
+                except OSError:
+                    continue
+
+                new_signature = history_file_signature(history_path)
+                if new_signature != signature:
+                    history = load_history_source(
+                        history_path,
+                        use_custom_history=use_custom_history,
+                        existing_history=history if use_custom_history else None,
+                    )
+                    native_history_candidates = build_native_history_candidates(history)
+                    signature = new_signature
+
+                raw_candidates = request.candidate_indices
+                candidate_indices = None
+                if raw_candidates is not None:
+                    max_idx = len(history) - 1
+                    candidate_indices = [idx for idx in raw_candidates if idx <= max_idx]
+                current_cwd = normalize_cwd_value(request.cwd) if request.cwd is not None else None
+                response = daemon_search_response_serialized(
+                    request.query,
+                    history,
+                    native_history_candidates,
+                    candidate_indices=candidate_indices,
+                    limit=request.limit,
+                    current_cwd=current_cwd,
+                )
+                request.respond_serialized(response)
+        finally:
+            try:
+                socket_path.unlink()
+            except OSError:
+                pass
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         try:
@@ -1972,7 +2076,7 @@ def run_history_daemon(
                     raw_cwd = request.get("cwd")
                     current_cwd = normalize_cwd_value(raw_cwd) if isinstance(raw_cwd, str) else None
 
-                    native_response = search_history_response_json_native(
+                    response = daemon_search_response_serialized(
                         query,
                         history,
                         native_history_candidates,
@@ -1980,48 +2084,7 @@ def run_history_daemon(
                         limit=limit,
                         current_cwd=current_cwd,
                     )
-                    if native_response is not None:
-                        daemon_write_serialized_response(conn, native_response)
-                        continue
-
-                    native_ranked = search_history_ranked_native(
-                        query,
-                        history,
-                        native_history_candidates,
-                        candidate_indices=candidate_indices,
-                        limit=limit,
-                        current_cwd=current_cwd,
-                    )
-                    if native_ranked is not None:
-                        history_results, indices_payload, matched_count = native_ranked
-                    else:
-                        history_results_all, matched_indices = search_history_only(
-                            query,
-                            history,
-                            candidate_indices=candidate_indices,
-                            limit=None,
-                        )
-                        history_results = apply_prefix_priority(
-                            query,
-                            history_results_all,
-                            limit=limit,
-                            current_cwd=current_cwd,
-                        )
-                        matched_count = len(matched_indices)
-                        # The client never sends candidate lists over this limit
-                        # back to us, so returning them only wastes JSON encoding,
-                        # socket traffic, and frontend memory.
-                        indices_payload = daemon_matched_indices_payload(query, matched_indices)
-                    daemon_write_response(
-                        conn,
-                        {
-                            "ok": True,
-                            "history_results": [match_result_to_payload(item) for item in history_results],
-                            "matched_indices": indices_payload,
-                            "matched_indices_omitted": indices_payload is None,
-                            "matched_count": matched_count,
-                        },
-                    )
+                    daemon_write_serialized_response(conn, response)
         finally:
             try:
                 socket_path.unlink()

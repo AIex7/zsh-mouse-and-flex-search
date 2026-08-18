@@ -377,6 +377,73 @@ class NativeFlexMatchTests(unittest.TestCase):
             ],
         )
 
+    def test_native_daemon_server_dispatch(self) -> None:
+        self.assertIsNotNone(engine._NativeDaemonServer)
+        response = {
+            "ok": True,
+            "history_results": [],
+            "matched_indices": [3],
+            "matched_indices_omitted": False,
+            "matched_count": 1,
+        }
+        captured: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory) / "native-server.sock"
+            server = engine._NativeDaemonServer(str(socket_path))
+
+            def serve_search() -> None:
+                request = server.accept_search()
+                captured["query"] = request.query
+                captured["candidate_indices"] = request.candidate_indices
+                captured["limit"] = request.limit
+                captured["cwd"] = request.cwd
+                captured["responded"] = request.respond_serialized(
+                    json.dumps(response, separators=(",", ":"))
+                )
+
+            server_thread = threading.Thread(target=serve_search)
+            server_thread.start()
+
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as malformed_client:
+                malformed_client.connect(str(socket_path))
+                malformed_client.sendall(b"not json\n")
+                malformed_response = malformed_client.recv(4096)
+
+            ping = engine.daemon_send_request(socket_path, {"action": "ping"})
+            unknown = engine.daemon_send_request(socket_path, {"action": "unknown"})
+            search_response = engine.daemon_send_request(
+                socket_path,
+                {
+                    "action": "search_history",
+                    "query": "git st",
+                    "candidate_indices": [-1, 3],
+                    "limit": 100,
+                    "cwd": "/repo",
+                },
+            )
+            server_thread.join(timeout=2)
+            socket_mode = socket_path.stat().st_mode & 0o777
+
+        self.assertFalse(server_thread.is_alive())
+        self.assertEqual(
+            json.loads(malformed_response),
+            {"ok": False, "error": "invalid request"},
+        )
+        self.assertEqual(ping, {"ok": True})
+        self.assertEqual(unknown, {"ok": False, "error": "unknown action"})
+        self.assertEqual(search_response, response)
+        self.assertEqual(socket_mode, 0o600)
+        self.assertEqual(
+            captured,
+            {
+                "query": "git st",
+                "candidate_indices": [3],
+                "limit": 100,
+                "cwd": "/repo",
+                "responded": True,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
