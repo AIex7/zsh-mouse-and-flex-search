@@ -186,6 +186,13 @@ def query_pos_from_visual(
     return row.end
 
 
+def query_click_visual_col(mouse_col: int, query_row: int, anchor_col: int) -> int:
+    """Translate a 1-based terminal mouse column into a query-row column."""
+    draw_col = anchor_col if query_row == 0 else 1
+    lead_cols = 1 if query_row == 0 else 0
+    return max(0, mouse_col - draw_col - lead_cols)
+
+
 def wrapped_query_layout(
     query: str,
     cursor_pos: int,
@@ -1629,8 +1636,12 @@ def run(
                         # Query line interactions (including wrapped rows).
                         if anchor_row <= my < (anchor_row + query_rows_used):
                             click_row = my - anchor_row
-                            click_anchor_col = anchor_col if query_start + click_row == 0 else 1
-                            click_col = max(0, mx - click_anchor_col - 1)
+                            absolute_query_row = query_start + click_row
+                            click_col = query_click_visual_col(
+                                mx,
+                                absolute_query_row,
+                                anchor_col,
+                            )
                             click_pos = query_pos_from_visual(
                                 query,
                                 query_width,
