@@ -605,18 +605,23 @@ def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list
     return entries
 
 
-def load_custom_history(
+def load_custom_history_update(
     path: Path,
     *,
     existing_history: Optional[list[HistoryEntry]] = None,
     limit: Optional[int] = None,
-) -> list[HistoryEntry]:
+) -> tuple[list[HistoryEntry], Optional[list[HistoryEntry]]]:
+    """Load custom history and identify a safe incremental prepend when possible.
+
+    The second tuple member is ``None`` when native consumers must rebuild,
+    otherwise it contains only the new newest-first entries.
+    """
     if not existing_history:
-        return load_custom_history_rows(path, limit=limit)
+        return load_custom_history_rows(path, limit=limit), None
 
     recent_entries = load_custom_history_rows(path, limit=10)
     if not recent_entries:
-        return []
+        return [], None
 
     existing_keys = {
         (entry.timestamp, entry.text, entry.cwd, entry.failed)
@@ -630,7 +635,7 @@ def load_custom_history(
             break
 
     if overlap_at is None:
-        return load_custom_history_rows(path)
+        return load_custom_history_rows(path), None
 
     newer_entries = [
         entry
@@ -638,11 +643,25 @@ def load_custom_history(
         if (entry.timestamp, entry.text, entry.cwd, entry.failed) not in existing_keys
     ]
     if not newer_entries:
-        return existing_history
+        return existing_history, []
 
     replaced_pairs = {(entry.text, entry.cwd) for entry in newer_entries}
     merged_history = [entry for entry in existing_history if (entry.text, entry.cwd) not in replaced_pairs]
-    return newer_entries + merged_history
+    return newer_entries + merged_history, newer_entries
+
+
+def load_custom_history(
+    path: Path,
+    *,
+    existing_history: Optional[list[HistoryEntry]] = None,
+    limit: Optional[int] = None,
+) -> list[HistoryEntry]:
+    history, _ = load_custom_history_update(
+        path,
+        existing_history=existing_history,
+        limit=limit,
+    )
+    return history
 
 
 def load_history_source(
@@ -1174,26 +1193,56 @@ def dedupe_match_results_preserving_order(results: list[MatchResult]) -> list[Ma
     return deduped
 
 
+def native_history_candidate_inputs(history: Sequence[HistoryEntry]) -> list[tuple[Any, ...]]:
+    return [
+        (
+            entry.text,
+            entry.text_lower or entry.text.lower(),
+            entry.text.strip().lower(),
+            entry.cwd,
+            list(
+                entry.words
+                or tuple(shell_words_for_matching(entry.text_lower or entry.text.lower()))
+            ),
+            entry.failed,
+        )
+        for entry in history
+    ]
+
+
 def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Optional[Any]:
     """Copy searchable history text into a Rust-owned cache once per load."""
     if _NativeHistory is None:
         return None
-    return _NativeHistory(
-        [
-            (
-                entry.text,
-                entry.text_lower or entry.text.lower(),
-                entry.text.strip().lower(),
-                entry.cwd,
-                list(
-                    entry.words
-                    or tuple(shell_words_for_matching(entry.text_lower or entry.text.lower()))
-                ),
-                entry.failed,
-            )
-            for entry in history
-        ]
-    )
+    return _NativeHistory(native_history_candidate_inputs(history))
+
+
+def refresh_history_caches(
+    path: Path,
+    *,
+    use_custom_history: bool,
+    history: list[HistoryEntry],
+    native_candidates: Optional[Any],
+) -> tuple[list[HistoryEntry], Optional[Any]]:
+    """Refresh Python history and incrementally update Rust when overlap is known."""
+    if not use_custom_history:
+        refreshed = load_history(path)
+        return refreshed, build_native_history_candidates(refreshed)
+
+    refreshed, newer_entries = load_custom_history_update(path, existing_history=history)
+    if native_candidates is not None and newer_entries is not None:
+        if not newer_entries and len(native_candidates) == len(refreshed):
+            return refreshed, native_candidates
+        prepend_replacing = getattr(native_candidates, "prepend_replacing", None)
+        if prepend_replacing is not None:
+            try:
+                prepend_replacing(native_history_candidate_inputs(newer_entries))
+            except (RuntimeError, TypeError, ValueError):
+                pass
+            else:
+                if len(native_candidates) == len(refreshed):
+                    return refreshed, native_candidates
+    return refreshed, build_native_history_candidates(refreshed)
 
 
 def search_history_ranked_native(
@@ -1993,12 +2042,12 @@ def run_history_daemon(
 
                 new_signature = history_file_signature(history_path)
                 if new_signature != signature:
-                    history = load_history_source(
+                    history, native_history_candidates = refresh_history_caches(
                         history_path,
                         use_custom_history=use_custom_history,
-                        existing_history=history if use_custom_history else None,
+                        history=history,
+                        native_candidates=native_history_candidates,
                     )
-                    native_history_candidates = build_native_history_candidates(history)
                     signature = new_signature
 
                 raw_candidates = request.candidate_indices
@@ -2046,12 +2095,12 @@ def run_history_daemon(
 
                     new_signature = history_file_signature(history_path)
                     if new_signature != signature:
-                        history = load_history_source(
+                        history, native_history_candidates = refresh_history_caches(
                             history_path,
                             use_custom_history=use_custom_history,
-                            existing_history=history if use_custom_history else None,
+                            history=history,
+                            native_candidates=native_history_candidates,
                         )
-                        native_history_candidates = build_native_history_candidates(history)
                         signature = new_signature
 
                     action = request.get("action")

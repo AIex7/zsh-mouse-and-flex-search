@@ -702,6 +702,31 @@ impl NativeHistory {
         self.candidates.len()
     }
 
+    /// Prepend newly loaded SQLite rows and discard older rows they replace.
+    ///
+    /// Retained candidates keep their owned strings and precomputed metadata;
+    /// only the small new prefix is constructed.
+    fn prepend_replacing(&mut self, candidates: Vec<CandidateInput>) {
+        if candidates.is_empty() {
+            return;
+        }
+        {
+            let replaced_pairs: HashSet<(&str, Option<&str>)> = candidates
+                .iter()
+                .map(|candidate| (candidate.0.as_str(), candidate.3.as_deref()))
+                .collect();
+            self.candidates.retain(|candidate| {
+                !replaced_pairs.contains(&(candidate.text.as_str(), candidate.cwd.as_deref()))
+            });
+        }
+        let additions = candidates.into_iter().map(
+            |(text, text_lower, normalized_text, cwd, words, failed)| {
+                NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
+            },
+        );
+        self.candidates.splice(0..0, additions);
+    }
+
     fn flex_match_many(
         &self,
         py: Python<'_>,
