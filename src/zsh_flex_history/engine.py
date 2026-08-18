@@ -28,11 +28,13 @@ try:
     from ._flex_match import NativeHistory as _NativeHistory
     from ._flex_match import flex_match as _native_flex_match
     from ._flex_match import parse_search_response as _native_parse_search_response
+    from ._flex_match import search_daemon as _native_search_daemon
     from ._flex_match import serialize_search_request as _native_serialize_search_request
 except ImportError:
     _NativeHistory = None
     _native_flex_match = None
     _native_parse_search_response = None
+    _native_search_daemon = None
     _native_serialize_search_request = None
 
 ANSI_COLOR_NAMES = {
@@ -1702,56 +1704,86 @@ class HistoryDaemonClient:
             else None
         )
         normalized_cwd = normalize_cwd_value(cwd) if cwd else None
-        if _native_serialize_search_request is not None:
-            serialized_request = _native_serialize_search_request(
+        raw_response: Optional[bytes] = None
+        parsed_native: Optional[tuple[list[tuple[Any, ...]], Optional[list[int]], int]] = None
+
+        if _native_search_daemon is not None:
+            exchanged, parsed_native = _native_search_daemon(
+                str(self.socket_path),
                 query,
                 bounded_indices,
                 limit,
                 normalized_cwd,
             )
-        else:
-            payload: dict[str, Any] = {"action": "search_history", "query": query}
-            if bounded_indices is not None:
-                payload["candidate_indices"] = list(bounded_indices)
-            if limit is not None:
-                payload["limit"] = limit
-            if normalized_cwd:
-                payload["cwd"] = normalized_cwd
-            serialized_request = (json.dumps(payload, separators=(",", ":")) + "\n").encode(
-                "utf-8"
-            )
-
-        raw_response = daemon_send_serialized_request(self.socket_path, serialized_request)
-        if raw_response is None:
-            if not self.ensure_running():
+            if not exchanged:
+                if not self.ensure_running():
+                    return None
+                exchanged, parsed_native = _native_search_daemon(
+                    str(self.socket_path),
+                    query,
+                    bounded_indices,
+                    limit,
+                    normalized_cwd,
+                )
+                if not exchanged:
+                    return None
+            if parsed_native is None:
                 return None
+        else:
+            if _native_serialize_search_request is not None:
+                serialized_request = _native_serialize_search_request(
+                    query,
+                    bounded_indices,
+                    limit,
+                    normalized_cwd,
+                )
+            else:
+                payload: dict[str, Any] = {"action": "search_history", "query": query}
+                if bounded_indices is not None:
+                    payload["candidate_indices"] = list(bounded_indices)
+                if limit is not None:
+                    payload["limit"] = limit
+                if normalized_cwd:
+                    payload["cwd"] = normalized_cwd
+                serialized_request = (
+                    json.dumps(payload, separators=(",", ":")) + "\n"
+                ).encode("utf-8")
+
             raw_response = daemon_send_serialized_request(self.socket_path, serialized_request)
             if raw_response is None:
-                return None
+                if not self.ensure_running():
+                    return None
+                raw_response = daemon_send_serialized_request(self.socket_path, serialized_request)
+                if raw_response is None:
+                    return None
 
-        if _native_parse_search_response is not None:
-            parsed_native = _native_parse_search_response(raw_response)
-            if parsed_native is not None:
-                raw_results, parsed_indices, matched_count = parsed_native
-                parsed_results = [
-                    MatchResult(
-                        text=text,
-                        score=score,
-                        exact=exact,
-                        recency=recency,
-                        cwd=result_cwd,
-                        failed=failed,
-                        words=tuple(words),
-                    )
-                    for text, score, exact, recency, result_cwd, failed, words in raw_results
-                ]
-                if self.debug:
-                    indices_state = "included" if parsed_indices is not None else "omitted"
-                    daemon_debug_log(
-                        True,
-                        f"query={query!r} matched_count={matched_count} matched_indices={indices_state}",
-                    )
-                return parsed_results, parsed_indices, matched_count
+            if _native_parse_search_response is not None:
+                parsed_native = _native_parse_search_response(raw_response)
+
+        if parsed_native is not None:
+            raw_results, parsed_indices, matched_count = parsed_native
+            parsed_results = [
+                MatchResult(
+                    text=text,
+                    score=score,
+                    exact=exact,
+                    recency=recency,
+                    cwd=result_cwd,
+                    failed=failed,
+                    words=tuple(words),
+                )
+                for text, score, exact, recency, result_cwd, failed, words in raw_results
+            ]
+            if self.debug:
+                indices_state = "included" if parsed_indices is not None else "omitted"
+                daemon_debug_log(
+                    True,
+                    f"query={query!r} matched_count={matched_count} matched_indices={indices_state}",
+                )
+            return parsed_results, parsed_indices, matched_count
+
+        if raw_response is None:
+            return None
 
         try:
             response = json.loads(raw_response.decode("utf-8"))

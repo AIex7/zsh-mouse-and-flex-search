@@ -3,6 +3,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
 
@@ -382,6 +385,97 @@ struct ParsedSearchResponse {
 type ParsedResult = (String, i64, bool, i64, Option<String>, bool, Vec<String>);
 type ParsedResponse = (Vec<ParsedResult>, Option<Vec<usize>>, usize);
 
+fn parse_search_response_bytes(raw: &[u8]) -> Option<ParsedResponse> {
+    let response: ParsedSearchResponse = serde_json::from_slice(raw).ok()?;
+    if !response.ok {
+        return None;
+    }
+    let matched_count = response
+        .matched_count
+        .unwrap_or_else(|| response.matched_indices.as_ref().map_or(0, Vec::len));
+    let results = response
+        .history_results
+        .into_iter()
+        .map(|result| {
+            (
+                result.text,
+                result.score,
+                result.exact,
+                result.recency,
+                result.cwd,
+                result.failed,
+                result.words,
+            )
+        })
+        .collect();
+    Some((results, response.matched_indices, matched_count))
+}
+
+fn serialize_search_request_bytes(
+    query: &str,
+    candidate_indices: Option<&[usize]>,
+    limit: Option<i64>,
+    cwd: Option<&str>,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let payload = SearchRequestPayload {
+        action: "search_history",
+        query,
+        candidate_indices,
+        limit,
+        cwd,
+    };
+    let mut serialized = serde_json::to_vec(&payload)?;
+    serialized.push(b'\n');
+    Ok(serialized)
+}
+
+fn daemon_exchange_bytes(
+    socket_path: &str,
+    request: &[u8],
+    timeout: Duration,
+) -> Option<Vec<u8>> {
+    const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+    let mut stream = UnixStream::connect(socket_path).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    stream.write_all(request).ok()?;
+
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 65_536];
+    loop {
+        let count = stream.read(&mut buffer).ok()?;
+        if count == 0 {
+            break;
+        }
+        let chunk = &buffer[..count];
+        if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
+            if response.len() + newline > MAX_RESPONSE_BYTES {
+                return None;
+            }
+            response.extend_from_slice(&chunk[..newline]);
+            break;
+        }
+        response.extend_from_slice(chunk);
+        if response.len() > MAX_RESPONSE_BYTES {
+            return None;
+        }
+    }
+
+    let start = response
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let end = response
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())?
+        + 1;
+    if start > 0 {
+        response.drain(..start);
+    }
+    response.truncate(end - start);
+    Some(response)
+}
+
 fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
     if words.is_empty() {
         return false;
@@ -625,29 +719,7 @@ fn flex_match(query_lower: &str, candidate: &str, candidate_lower: &str) -> Opti
 
 #[pyfunction]
 fn parse_search_response(raw: &[u8]) -> Option<ParsedResponse> {
-    let response: ParsedSearchResponse = serde_json::from_slice(raw).ok()?;
-    if !response.ok {
-        return None;
-    }
-    let matched_count = response
-        .matched_count
-        .unwrap_or_else(|| response.matched_indices.as_ref().map_or(0, Vec::len));
-    let results = response
-        .history_results
-        .into_iter()
-        .map(|result| {
-            (
-                result.text,
-                result.score,
-                result.exact,
-                result.recency,
-                result.cwd,
-                result.failed,
-                result.words,
-            )
-        })
-        .collect();
-    Some((results, response.matched_indices, matched_count))
+    parse_search_response_bytes(raw)
 }
 
 #[pyfunction]
@@ -659,17 +731,35 @@ fn serialize_search_request<'py>(
     limit: Option<i64>,
     cwd: Option<&str>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let payload = SearchRequestPayload {
-        action: "search_history",
-        query,
-        candidate_indices: candidate_indices.as_deref(),
-        limit,
-        cwd,
-    };
-    let mut serialized =
-        serde_json::to_vec(&payload).map_err(|error| PyValueError::new_err(error.to_string()))?;
-    serialized.push(b'\n');
+    let serialized = serialize_search_request_bytes(query, candidate_indices.as_deref(), limit, cwd)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(PyBytes::new(py, &serialized))
+}
+
+#[pyfunction]
+#[pyo3(signature = (socket_path, query, candidate_indices=None, limit=None, cwd=None, timeout_seconds=0.5))]
+fn search_daemon(
+    py: Python<'_>,
+    socket_path: &str,
+    query: &str,
+    candidate_indices: Option<Vec<usize>>,
+    limit: Option<i64>,
+    cwd: Option<&str>,
+    timeout_seconds: f64,
+) -> (bool, Option<ParsedResponse>) {
+    let Ok(timeout) = Duration::try_from_secs_f64(timeout_seconds) else {
+        return (false, None);
+    };
+    let Ok(request) =
+        serialize_search_request_bytes(query, candidate_indices.as_deref(), limit, cwd)
+    else {
+        return (false, None);
+    };
+    let response = py.allow_threads(|| daemon_exchange_bytes(socket_path, &request, timeout));
+    let Some(response) = response else {
+        return (false, None);
+    };
+    (true, parse_search_response_bytes(&response))
 }
 
 #[pymodule]
@@ -677,5 +767,6 @@ fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NativeHistory>()?;
     module.add_function(wrap_pyfunction!(flex_match, module)?)?;
     module.add_function(wrap_pyfunction!(parse_search_response, module)?)?;
-    module.add_function(wrap_pyfunction!(serialize_search_request, module)?)
+    module.add_function(wrap_pyfunction!(serialize_search_request, module)?)?;
+    module.add_function(wrap_pyfunction!(search_daemon, module)?)
 }

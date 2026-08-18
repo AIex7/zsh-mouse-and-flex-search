@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import random
+import socket
+import tempfile
+import threading
 import unittest
 from array import array
 from pathlib import Path
@@ -259,6 +262,119 @@ class NativeFlexMatchTests(unittest.TestCase):
         self.assertEqual(
             json.loads(engine._native_serialize_search_request("x")),
             {"action": "search_history", "query": "x"},
+        )
+
+    def test_native_daemon_round_trip(self) -> None:
+        self.assertIsNotNone(engine._native_search_daemon)
+        response = {
+            "ok": True,
+            "history_results": [
+                {
+                    "text": "git status --short",
+                    "score": 72,
+                    "exact": False,
+                    "recency": -3,
+                    "cwd": "/repo",
+                    "failed": False,
+                    "words": ["git", "status", "--short"],
+                }
+            ],
+            "matched_indices": [3, 8],
+            "matched_indices_omitted": False,
+            "matched_count": 2,
+        }
+        received: list[bytes] = []
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = str(Path(directory) / "history.sock")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(socket_path)
+                listener.listen(1)
+
+                def serve_twice() -> None:
+                    for _ in range(2):
+                        connection, _ = listener.accept()
+                        with connection:
+                            request = bytearray()
+                            while b"\n" not in request:
+                                chunk = connection.recv(65_536)
+                                if not chunk:
+                                    break
+                                request.extend(chunk)
+                            received.append(bytes(request))
+                            connection.sendall(json.dumps(response).encode("utf-8") + b"\n")
+
+                server = threading.Thread(target=serve_twice)
+                server.start()
+                exchanged, parsed = engine._native_search_daemon(
+                    socket_path,
+                    "git st",
+                    array("I", [3, 8]),
+                    100,
+                    "/repo",
+                )
+                client = engine.HistoryDaemonClient(
+                    Path(socket_path),
+                    Path(directory) / "unused-history",
+                    Path(directory) / "unused-script",
+                )
+                client_result = client.search_history(
+                    "git st",
+                    candidate_indices=array("I", [3, 8]),
+                    limit=100,
+                    cwd="/repo",
+                )
+                server.join(timeout=2)
+
+        self.assertFalse(server.is_alive())
+        self.assertTrue(exchanged)
+        self.assertEqual(len(received), 2)
+        self.assertEqual(
+            json.loads(received[0]),
+            {
+                "action": "search_history",
+                "query": "git st",
+                "candidate_indices": [3, 8],
+                "limit": 100,
+                "cwd": "/repo",
+            },
+        )
+        self.assertEqual(json.loads(received[1]), json.loads(received[0]))
+        self.assertEqual(
+            parsed,
+            (
+                [
+                    (
+                        "git status --short",
+                        72,
+                        False,
+                        -3,
+                        "/repo",
+                        False,
+                        ["git", "status", "--short"],
+                    )
+                ],
+                [3, 8],
+                2,
+            ),
+        )
+        self.assertIsNotNone(client_result)
+        assert client_result is not None
+        client_results, client_indices, client_count = client_result
+        self.assertEqual(client_indices, [3, 8])
+        self.assertEqual(client_count, 2)
+        self.assertEqual(
+            client_results,
+            [
+                engine.MatchResult(
+                    text="git status --short",
+                    score=72,
+                    exact=False,
+                    recency=-3,
+                    cwd="/repo",
+                    failed=False,
+                    words=("git", "status", "--short"),
+                )
+            ],
         )
 
 
