@@ -538,18 +538,48 @@ def ensure_custom_history_file(path: Path) -> None:
                 command TEXT NOT NULL,
                 cwd TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                failed INTEGER NOT NULL DEFAULT 0
+                failed INTEGER NOT NULL DEFAULT 0,
+                status_revision INTEGER NOT NULL DEFAULT 0
             )
             """
         )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(custom_history)").fetchall()}
         if "failed" not in columns:
             conn.execute("ALTER TABLE custom_history ADD COLUMN failed INTEGER NOT NULL DEFAULT 0")
+        if "status_revision" not in columns:
+            conn.execute(
+                "ALTER TABLE custom_history ADD COLUMN status_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS custom_history_metadata (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                status_revision INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO custom_history_metadata(id, status_revision) VALUES(1, 0)"
+        )
+        conn.execute(
+            """
+            UPDATE custom_history_metadata
+            SET status_revision = MAX(
+                status_revision,
+                COALESCE((SELECT MAX(status_revision) FROM custom_history), 0)
+            )
+            WHERE id = 1
+            """
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_custom_history_command_cwd ON custom_history(command, cwd)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_custom_history_id_desc ON custom_history(id DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_custom_history_status_revision "
+            "ON custom_history(status_revision)"
         )
         conn.commit()
 
@@ -663,6 +693,8 @@ def update_custom_history_exit_status(
     try:
         ensure_custom_history_file(path)
         with sqlite3.connect(path) as conn:
+            # Select and update the same command row while excluding concurrent writers.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
                 SELECT id, timestamp
@@ -685,8 +717,16 @@ def update_custom_history_exit_status(
             if age.total_seconds() < 0 or age.total_seconds() > max_age_seconds:
                 return False
             conn.execute(
-                "UPDATE custom_history SET failed = ? WHERE id = ?",
-                (1 if status != 0 else 0, row_id),
+                "UPDATE custom_history_metadata SET status_revision = status_revision + 1 WHERE id = 1"
+            )
+            revision_row = conn.execute(
+                "SELECT status_revision FROM custom_history_metadata WHERE id = 1"
+            ).fetchone()
+            if not revision_row or not isinstance(revision_row[0], int):
+                return False
+            conn.execute(
+                "UPDATE custom_history SET failed = ?, status_revision = ? WHERE id = ?",
+                (1 if status != 0 else 0, revision_row[0], row_id),
             )
             conn.commit()
     except (OSError, sqlite3.Error):
@@ -1126,11 +1166,11 @@ def build_native_custom_history_candidates(
     *,
     limit: Optional[int] = None,
     batch_size: int = 1_000,
-) -> tuple[Any, Optional[CustomHistoryWatermark]]:
+) -> tuple[Any, Optional[CustomHistoryWatermark], int]:
     """Stream SQLite history into Rust without retaining a full Python copy."""
     native_candidates = _NativeHistory([])
     if not path.exists():
-        return native_candidates, None
+        return native_candidates, None, 0
 
     query = "SELECT id, command, cwd, timestamp, failed FROM custom_history ORDER BY id DESC"
     params: tuple[object, ...] = ()
@@ -1138,8 +1178,14 @@ def build_native_custom_history_candidates(
         query += " LIMIT ?"
         params = (limit,)
     watermark: Optional[CustomHistoryWatermark] = None
+    status_revision = 0
     try:
         with sqlite3.connect(path) as conn:
+            revision_row = conn.execute(
+                "SELECT status_revision FROM custom_history_metadata WHERE id = 1"
+            ).fetchone()
+            if revision_row and isinstance(revision_row[0], int):
+                status_revision = revision_row[0]
             cursor = conn.execute(query, params)
             while True:
                 rows = cursor.fetchmany(batch_size)
@@ -1151,8 +1197,8 @@ def build_native_custom_history_candidates(
                 entries = [record.entry for record in records]
                 native_candidates.extend(native_history_candidate_inputs(entries))
     except (OSError, sqlite3.Error):
-        return _NativeHistory([]), None
-    return native_candidates, watermark
+        return _NativeHistory([]), None, 0
+    return native_candidates, watermark, status_revision
 
 
 def native_history_response_json(
@@ -1205,6 +1251,7 @@ class DaemonHistoryState:
     history_length: Optional[int]
     native_candidates: Any
     custom_history_watermark: Optional[CustomHistoryWatermark]
+    custom_history_status_revision: int = 0
 
     @classmethod
     def load(
@@ -1215,11 +1262,18 @@ class DaemonHistoryState:
         history_length: Optional[int],
     ) -> "DaemonHistoryState":
         if use_custom_history:
-            native_candidates, watermark = build_native_custom_history_candidates(
+            native_candidates, watermark, status_revision = build_native_custom_history_candidates(
                 path,
                 limit=history_length,
             )
-            return cls(path, use_custom_history, history_length, native_candidates, watermark)
+            return cls(
+                path,
+                use_custom_history,
+                history_length,
+                native_candidates,
+                watermark,
+                status_revision,
+            )
 
         history = load_history_source(
             path,
@@ -1240,12 +1294,13 @@ class DaemonHistoryState:
 
     def _rebuild_native(self) -> None:
         if self.use_custom_history:
-            native_candidates, watermark = build_native_custom_history_candidates(
+            native_candidates, watermark, status_revision = build_native_custom_history_candidates(
                 self.path,
                 limit=self.history_length,
             )
             self.native_candidates = native_candidates
             self.custom_history_watermark = watermark
+            self.custom_history_status_revision = status_revision
             return
 
         history = load_history_source(
@@ -1254,6 +1309,7 @@ class DaemonHistoryState:
         )
         self.native_candidates = build_native_history_candidates(history)
         self.custom_history_watermark = None
+        self.custom_history_status_revision = 0
 
     def refresh(self) -> None:
         self.native_candidates.clear_daemon_query_cache()
@@ -1268,6 +1324,8 @@ class DaemonHistoryState:
 
         try:
             with sqlite3.connect(self.path) as conn:
+                # Keep the row changes and revision cursor on one SQLite snapshot.
+                conn.execute("BEGIN")
                 rows = conn.execute(
                     """
                     SELECT id, command, cwd, timestamp, failed
@@ -1277,6 +1335,19 @@ class DaemonHistoryState:
                     """,
                     (watermark.row_id,),
                 ).fetchall()
+                status_rows = conn.execute(
+                    """
+                    SELECT h.failed,
+                           (SELECT COUNT(*) FROM custom_history AS newer WHERE newer.id > h.id)
+                    FROM custom_history AS h
+                    WHERE h.status_revision > ?
+                    ORDER BY h.status_revision
+                    """,
+                    (self.custom_history_status_revision,),
+                ).fetchall()
+                revision_row = conn.execute(
+                    "SELECT status_revision FROM custom_history_metadata WHERE id = 1"
+                ).fetchone()
         except (OSError, sqlite3.Error):
             self._rebuild_native()
             return
@@ -1301,15 +1372,21 @@ class DaemonHistoryState:
         changed_entries = [
             record.entry for record in records if record.row_id > watermark.row_id
         ]
-        if anchor.entry.failed != watermark.entry.failed:
-            changed_entries.append(anchor.entry)
         if changed_entries:
             self.native_candidates.prepend_replacing(
                 native_history_candidate_inputs(changed_entries)
             )
             if self.history_length is not None:
                 self.native_candidates.truncate(self.history_length)
+        for failed, candidate_index in status_rows:
+            if not isinstance(candidate_index, int):
+                continue
+            if self.history_length is not None and candidate_index >= self.history_length:
+                continue
+            self.native_candidates.update_failed_at(candidate_index, bool(failed))
         self.custom_history_watermark = records[0] if records else anchor
+        if revision_row and isinstance(revision_row[0], int):
+            self.custom_history_status_revision = revision_row[0]
 
     def search_response(
         self,

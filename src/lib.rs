@@ -909,6 +909,15 @@ impl NativeHistory {
         self.candidates.truncate(length);
     }
 
+    /// Update metadata for one SQLite row without rebuilding or reordering history.
+    fn update_failed_at(&mut self, index: usize, failed: bool) -> bool {
+        let Some(candidate) = self.candidates.get_mut(index) else {
+            return false;
+        };
+        candidate.failed = failed;
+        true
+    }
+
     /// Prepend newly loaded SQLite rows and discard older rows they replace.
     ///
     /// Retained candidates keep their owned strings and precomputed metadata;
