@@ -320,7 +320,7 @@ impl NativeCandidate {
 /// Subsequent searches avoid extracting every Python tuple again.
 #[pyclass]
 struct NativeHistory {
-    candidates: Vec<NativeCandidate>,
+    candidates: VecDeque<NativeCandidate>,
     daemon_query_cache: Mutex<DaemonQueryCache>,
 }
 
@@ -849,7 +849,7 @@ impl NativeHistory {
 impl NativeHistory {
     #[new]
     fn new(candidates: Vec<CandidateInput>) -> Self {
-        let candidates = candidates
+        let candidates: VecDeque<_> = candidates
             .into_iter()
             .map(|(text, text_lower, normalized_text, cwd, words, failed)| {
                 NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
@@ -898,6 +898,17 @@ impl NativeHistory {
         ));
     }
 
+    fn truncate(&mut self, length: usize) {
+        if self.candidates.len() <= length {
+            return;
+        }
+        self.daemon_query_cache
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.candidates.truncate(length);
+    }
+
     /// Prepend newly loaded SQLite rows and discard older rows they replace.
     ///
     /// Retained candidates keep their owned strings and precomputed metadata;
@@ -915,16 +926,30 @@ impl NativeHistory {
                 .iter()
                 .map(|candidate| (candidate.0.as_str(), candidate.3.as_deref()))
                 .collect();
-            self.candidates.retain(|candidate| {
-                !replaced_pairs.contains(&(candidate.text.as_str(), candidate.cwd.as_deref()))
-            });
+            let mut index = 0;
+            while index < self.candidates.len() {
+                let candidate = &self.candidates[index];
+                if replaced_pairs
+                    .contains(&(candidate.text.as_str(), candidate.cwd.as_deref()))
+                {
+                    self.candidates.remove(index);
+                } else {
+                    index += 1;
+                }
+            }
         }
-        let additions = candidates.into_iter().map(
-            |(text, text_lower, normalized_text, cwd, words, failed)| {
-                NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
-            },
-        );
-        self.candidates.splice(0..0, additions);
+        for (text, text_lower, normalized_text, cwd, words, failed) in
+            candidates.into_iter().rev()
+        {
+            self.candidates.push_front(NativeCandidate::new(
+                text,
+                text_lower,
+                normalized_text,
+                cwd,
+                words,
+                failed,
+            ));
+        }
     }
 
     fn flex_match_many(

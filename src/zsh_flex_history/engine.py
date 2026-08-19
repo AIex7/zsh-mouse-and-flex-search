@@ -554,30 +554,30 @@ def ensure_custom_history_file(path: Path) -> None:
         conn.commit()
 
 
+def custom_history_entry_from_row(row: object) -> Optional[HistoryEntry]:
+    if not isinstance(row, tuple) or len(row) < 3:
+        return None
+    cmd = row[0]
+    cwd = row[1]
+    timestamp = row[2]
+    failed = row[3] if len(row) >= 4 else 0
+    if not isinstance(cmd, str):
+        return None
+    normalized_cwd = normalize_cwd_value(cwd) if isinstance(cwd, str) else ""
+    normalized_timestamp = timestamp if isinstance(timestamp, str) else None
+    cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
+    if not cleaned.strip():
+        return None
+    return make_history_entry(
+        cleaned,
+        cwd=normalized_cwd or None,
+        timestamp=normalized_timestamp,
+        failed=bool(failed),
+    )
+
+
 def custom_history_entries_from_rows(rows: Sequence[object]) -> list[HistoryEntry]:
-    entries: list[HistoryEntry] = []
-    for row in rows:
-        if not isinstance(row, tuple) or len(row) < 3:
-            continue
-        cmd = row[0]
-        cwd = row[1]
-        timestamp = row[2]
-        failed = row[3] if len(row) >= 4 else 0
-        if not isinstance(cmd, str):
-            continue
-        normalized_cwd = normalize_cwd_value(cwd) if isinstance(cwd, str) else ""
-        normalized_timestamp = timestamp if isinstance(timestamp, str) else None
-        cleaned = cmd.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "").strip("\n")
-        if cleaned.strip():
-            entries.append(
-                make_history_entry(
-                    cleaned,
-                    cwd=normalized_cwd or None,
-                    timestamp=normalized_timestamp,
-                    failed=bool(failed),
-                )
-            )
-    return entries
+    return [entry for row in rows if (entry := custom_history_entry_from_row(row)) is not None]
 
 
 def load_custom_history_rows(path: Path, *, limit: Optional[int] = None) -> list[HistoryEntry]:
@@ -1102,23 +1102,42 @@ def build_native_history_candidates(history: Sequence[HistoryEntry]) -> Any:
     return _NativeHistory(native_history_candidate_inputs(history))
 
 
+@dataclass(frozen=True)
+class CustomHistoryWatermark:
+    row_id: int
+    entry: HistoryEntry
+
+
+def custom_history_records_from_rows(
+    rows: Sequence[object],
+) -> list[CustomHistoryWatermark]:
+    records: list[CustomHistoryWatermark] = []
+    for row in rows:
+        if not isinstance(row, tuple) or len(row) < 5 or not isinstance(row[0], int):
+            continue
+        entry = custom_history_entry_from_row(row[1:])
+        if entry is not None:
+            records.append(CustomHistoryWatermark(row[0], entry))
+    return records
+
+
 def build_native_custom_history_candidates(
     path: Path,
     *,
     limit: Optional[int] = None,
     batch_size: int = 1_000,
-) -> tuple[Any, list[HistoryEntry]]:
+) -> tuple[Any, Optional[CustomHistoryWatermark]]:
     """Stream SQLite history into Rust without retaining a full Python copy."""
     native_candidates = _NativeHistory([])
     if not path.exists():
-        return native_candidates, []
+        return native_candidates, None
 
-    query = "SELECT command, cwd, timestamp, failed FROM custom_history ORDER BY id DESC"
+    query = "SELECT id, command, cwd, timestamp, failed FROM custom_history ORDER BY id DESC"
     params: tuple[object, ...] = ()
     if limit is not None and limit > 0:
         query += " LIMIT ?"
         params = (limit,)
-    recent_entries: list[HistoryEntry] = []
+    watermark: Optional[CustomHistoryWatermark] = None
     try:
         with sqlite3.connect(path) as conn:
             cursor = conn.execute(query, params)
@@ -1126,13 +1145,14 @@ def build_native_custom_history_candidates(
                 rows = cursor.fetchmany(batch_size)
                 if not rows:
                     break
-                entries = custom_history_entries_from_rows(rows)
-                if len(recent_entries) < 10:
-                    recent_entries.extend(entries[: 10 - len(recent_entries)])
+                records = custom_history_records_from_rows(rows)
+                if watermark is None and records:
+                    watermark = records[0]
+                entries = [record.entry for record in records]
                 native_candidates.extend(native_history_candidate_inputs(entries))
     except (OSError, sqlite3.Error):
-        return _NativeHistory([]), []
-    return native_candidates, recent_entries
+        return _NativeHistory([]), None
+    return native_candidates, watermark
 
 
 def native_history_response_json(
@@ -1178,17 +1198,13 @@ def native_history_response_json_for_daemon(
     )
 
 
-def history_entry_refresh_key(entry: HistoryEntry) -> tuple[Optional[str], str, Optional[str], bool]:
-    return entry.timestamp, entry.text, entry.cwd, entry.failed
-
-
 @dataclass
 class DaemonHistoryState:
     path: Path
     use_custom_history: bool
     history_length: Optional[int]
     native_candidates: Any
-    recent_entries: list[HistoryEntry]
+    custom_history_watermark: Optional[CustomHistoryWatermark]
 
     @classmethod
     def load(
@@ -1199,11 +1215,11 @@ class DaemonHistoryState:
         history_length: Optional[int],
     ) -> "DaemonHistoryState":
         if use_custom_history:
-            native_candidates, recent_entries = build_native_custom_history_candidates(
+            native_candidates, watermark = build_native_custom_history_candidates(
                 path,
                 limit=history_length,
             )
-            return cls(path, use_custom_history, history_length, native_candidates, recent_entries)
+            return cls(path, use_custom_history, history_length, native_candidates, watermark)
 
         history = load_history_source(
             path,
@@ -1216,7 +1232,7 @@ class DaemonHistoryState:
             use_custom_history,
             history_length,
             native_candidates,
-            history[:10] if use_custom_history else [],
+            None,
         )
 
     def __len__(self) -> int:
@@ -1224,9 +1240,12 @@ class DaemonHistoryState:
 
     def _rebuild_native(self) -> None:
         if self.use_custom_history:
-            native_candidates, recent_entries = build_native_custom_history_candidates(self.path)
+            native_candidates, watermark = build_native_custom_history_candidates(
+                self.path,
+                limit=self.history_length,
+            )
             self.native_candidates = native_candidates
-            self.recent_entries = recent_entries
+            self.custom_history_watermark = watermark
             return
 
         history = load_history_source(
@@ -1234,7 +1253,7 @@ class DaemonHistoryState:
             use_custom_history=self.use_custom_history,
         )
         self.native_candidates = build_native_history_candidates(history)
-        self.recent_entries = []
+        self.custom_history_watermark = None
 
     def refresh(self) -> None:
         self.native_candidates.clear_daemon_query_cache()
@@ -1242,34 +1261,55 @@ class DaemonHistoryState:
             self._rebuild_native()
             return
 
-        latest_entries = load_custom_history_rows(self.path, limit=10)
-        if not latest_entries:
-            self._rebuild_native()
-            return
-        existing_keys = {
-            history_entry_refresh_key(entry)
-            for entry in self.recent_entries
-            if entry.timestamp is not None
-        }
-        overlap_at: Optional[int] = None
-        for idx, entry in enumerate(latest_entries):
-            if history_entry_refresh_key(entry) in existing_keys:
-                overlap_at = idx
-                break
-        if overlap_at is None:
+        watermark = self.custom_history_watermark
+        if watermark is None:
             self._rebuild_native()
             return
 
-        newer_entries = [
-            entry
-            for entry in latest_entries[:overlap_at]
-            if history_entry_refresh_key(entry) not in existing_keys
+        try:
+            with sqlite3.connect(self.path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, command, cwd, timestamp, failed
+                    FROM custom_history
+                    WHERE id >= ?
+                    ORDER BY id DESC
+                    """,
+                    (watermark.row_id,),
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            self._rebuild_native()
+            return
+
+        records = custom_history_records_from_rows(rows)
+        anchor = next(
+            (record for record in records if record.row_id == watermark.row_id),
+            None,
+        )
+        if anchor is None or (
+            anchor.entry.text,
+            anchor.entry.cwd,
+            anchor.entry.timestamp,
+        ) != (
+            watermark.entry.text,
+            watermark.entry.cwd,
+            watermark.entry.timestamp,
+        ):
+            self._rebuild_native()
+            return
+
+        changed_entries = [
+            record.entry for record in records if record.row_id > watermark.row_id
         ]
-        if newer_entries:
+        if anchor.entry.failed != watermark.entry.failed:
+            changed_entries.append(anchor.entry)
+        if changed_entries:
             self.native_candidates.prepend_replacing(
-                native_history_candidate_inputs(newer_entries)
+                native_history_candidate_inputs(changed_entries)
             )
-        self.recent_entries = latest_entries
+            if self.history_length is not None:
+                self.native_candidates.truncate(self.history_length)
+        self.custom_history_watermark = records[0] if records else anchor
 
     def search_response(
         self,
