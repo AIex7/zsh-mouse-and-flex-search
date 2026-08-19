@@ -2,7 +2,8 @@ use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -324,12 +325,8 @@ type CandidateInput = (String, String, String, Option<String>, Vec<String>, bool
 struct RankedMatch {
     index: usize,
     score: i64,
-    prefix_word_count: u32,
-    ranking_flags: u8,
+    scan_order: usize,
 }
-
-const WORDS_IN_ORDER: u8 = 1;
-const SAME_CWD: u8 = 2;
 
 #[derive(Serialize)]
 struct HistoryResultPayload<'a> {
@@ -858,12 +855,12 @@ impl NativeHistory {
         let query = compact_query(query_lower);
         let query_ascii = ascii_query(&query);
         py.allow_threads(|| {
-            let mut matches = Vec::new();
+            let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
             let mut matched_indices = Some(Vec::new());
             let mut matched_count = 0;
-            let mut max_prefix_word_count = 0_u32;
+            let mut max_prefix_word_count = 0_usize;
 
-            let mut check_candidate = |index: usize| {
+            let mut check_candidate = |scan_order: usize, index: usize| {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
@@ -889,62 +886,94 @@ impl NativeHistory {
                     .take_while(|(query_word, candidate_word)| {
                         candidate_word.starts_with(query_word.as_str())
                     })
-                    .count()
-                    .min(u32::MAX as usize) as u32;
+                    .count();
                 max_prefix_word_count = max_prefix_word_count.max(prefix_word_count);
                 let words_in_order =
                     words_appear_in_order(&ordered_query_words, &candidate.text_lower);
                 let same_cwd = current_cwd
                     .as_deref()
                     .is_some_and(|cwd| candidate.cwd.as_deref() == Some(cwd));
-                matches.push(RankedMatch {
-                    index,
-                    score,
-                    prefix_word_count,
-                    ranking_flags: (u8::from(words_in_order) * WORDS_IN_ORDER)
-                        | (u8::from(same_cwd) * SAME_CWD),
-                });
-            };
-
-            if let Some(indices) = candidate_indices.as_deref() {
-                for &index in indices {
-                    check_candidate(index);
-                }
-            } else {
-                for index in 0..self.candidates.len() {
-                    check_candidate(index);
-                }
-            }
-
-            let result_limit = limit.unwrap_or(usize::MAX);
-            let mut selected = Vec::with_capacity(result_limit.min(matches.len()));
-            let mut seen = HashSet::new();
-            let mut buckets: [Vec<RankedMatch>; 8] = std::array::from_fn(|_| Vec::new());
-            for matched in matches {
-                let prefix_tier = usize::from(
-                    max_prefix_word_count > 0 && matched.prefix_word_count != max_prefix_word_count,
-                );
-                let inner_bucket = match (
-                    matched.ranking_flags & WORDS_IN_ORDER != 0,
-                    matched.ranking_flags & SAME_CWD != 0,
-                ) {
+                let inner_bucket = match (words_in_order, same_cwd) {
                     (true, true) => 0,
                     (true, false) => 1,
                     (false, true) => 2,
                     (false, false) => 3,
                 };
-                buckets[prefix_tier * 4 + inner_bucket].push(matched);
+                if buckets_by_prefix.len() <= prefix_word_count {
+                    buckets_by_prefix.resize_with(prefix_word_count + 1, || {
+                        std::array::from_fn(|_| Vec::new())
+                    });
+                }
+                buckets_by_prefix[prefix_word_count][inner_bucket].push(RankedMatch {
+                    index,
+                    score,
+                    scan_order,
+                });
+            };
+
+            if let Some(indices) = candidate_indices.as_deref() {
+                for (scan_order, &index) in indices.iter().enumerate() {
+                    check_candidate(scan_order, index);
+                }
+            } else {
+                for index in 0..self.candidates.len() {
+                    check_candidate(index, index);
+                }
             }
 
-            'buckets: for bucket in &buckets {
-                for matched in bucket {
-                    let text = self.candidates[matched.index].text.as_str();
-                    if !seen.insert(text) {
-                        continue;
-                    }
+            let result_limit = limit.unwrap_or(usize::MAX);
+            let mut selected = Vec::with_capacity(result_limit.min(matched_count));
+            let mut seen = HashSet::new();
+            let mut select_match = |matched: &RankedMatch| -> bool {
+                let text = self.candidates[matched.index].text.as_str();
+                if selected.len() < result_limit && seen.insert(text) {
                     selected.push((matched.index, matched.score));
-                    if selected.len() >= result_limit {
-                        break 'buckets;
+                }
+                selected.len() >= result_limit
+            };
+
+            let mut selection_complete = result_limit == 0;
+            if !selection_complete {
+                let prefix_buckets = buckets_by_prefix.get(max_prefix_word_count);
+                if let Some(prefix_buckets) = prefix_buckets {
+                    'preferred: for bucket in prefix_buckets {
+                        for matched in bucket {
+                            if select_match(matched) {
+                                selection_complete = true;
+                                break 'preferred;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !selection_complete && max_prefix_word_count > 0 {
+                'remaining: for inner_bucket in 0..4 {
+                    let mut heap = BinaryHeap::new();
+                    for (prefix_count, prefix_buckets) in buckets_by_prefix
+                        .iter()
+                        .enumerate()
+                        .take(max_prefix_word_count)
+                    {
+                        if let Some(matched) = prefix_buckets[inner_bucket].first() {
+                            heap.push(Reverse((matched.scan_order, prefix_count, 0_usize)));
+                        }
+                    }
+
+                    while let Some(Reverse((_, prefix_count, position))) = heap.pop() {
+                        let bucket = &buckets_by_prefix[prefix_count][inner_bucket];
+                        let matched = &bucket[position];
+                        if select_match(matched) {
+                            break 'remaining;
+                        }
+                        let next_position = position + 1;
+                        if let Some(next) = bucket.get(next_position) {
+                            heap.push(Reverse((
+                                next.scan_order,
+                                prefix_count,
+                                next_position,
+                            )));
+                        }
                     }
                 }
             }
