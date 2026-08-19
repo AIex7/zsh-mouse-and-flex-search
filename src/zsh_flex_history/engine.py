@@ -1125,7 +1125,6 @@ def native_history_candidate_inputs(history: Sequence[HistoryEntry]) -> list[tup
         (
             entry.text,
             entry.text_lower or entry.text.lower(),
-            entry.text.strip().lower(),
             entry.cwd,
             list(
                 entry.words

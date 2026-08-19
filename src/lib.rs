@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod syntax_highlighting;
@@ -20,6 +20,23 @@ const MAX_DAEMON_QUERY_CACHE_INDICES: usize = 1_000_000;
 
 fn is_word_boundary_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'_' | b'-' | b'/' | b'.' | b':')
+}
+
+fn is_python_whitespace(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}')
+}
+
+fn python_trim(value: &str) -> &str {
+    let start = value
+        .char_indices()
+        .find(|(_, character)| !is_python_whitespace(*character))
+        .map_or(value.len(), |(index, _)| index);
+    let end = value
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !is_python_whitespace(*character))
+        .map_or(start, |(index, character)| index + character.len_utf8());
+    &value[start..end]
 }
 
 fn compact_query(query_lower: &str) -> Vec<char> {
@@ -176,9 +193,10 @@ fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<
 
 struct NativeCandidate {
     text: String,
-    text_lower: String,
-    normalized_text: String,
-    cwd: Option<String>,
+    text_lower: Option<Box<str>>,
+    normalized_start: u32,
+    normalized_end: u32,
+    cwd: Option<Arc<str>>,
     words: Vec<String>,
     failed: bool,
     ascii: bool,
@@ -190,12 +208,22 @@ impl NativeCandidate {
     fn new(
         text: String,
         text_lower: String,
-        normalized_text: String,
-        cwd: Option<String>,
+        cwd: Option<Arc<str>>,
         words: Vec<String>,
         failed: bool,
     ) -> Self {
-        let ascii = text.is_ascii() && text_lower.is_ascii();
+        let text_lower = if text_lower == text {
+            None
+        } else {
+            Some(text_lower.into_boxed_str())
+        };
+        let lower = text_lower.as_deref().unwrap_or(&text);
+        let normalized = python_trim(lower);
+        let normalized_start = u32::try_from(normalized.as_ptr() as usize - lower.as_ptr() as usize)
+            .unwrap_or(u32::MAX);
+        let normalized_end = u32::try_from(normalized_start as usize + normalized.len())
+            .unwrap_or(u32::MAX);
+        let ascii = text.is_ascii() && lower.is_ascii();
         let boundary_characters = if ascii {
             Vec::new()
         } else {
@@ -211,7 +239,8 @@ impl NativeCandidate {
         Self {
             text,
             text_lower,
-            normalized_text,
+            normalized_start,
+            normalized_end,
             cwd,
             words,
             failed,
@@ -221,13 +250,23 @@ impl NativeCandidate {
         }
     }
 
+    fn text_lower(&self) -> &str {
+        self.text_lower.as_deref().unwrap_or(&self.text)
+    }
+
+    fn normalized_text(&self) -> &str {
+        self.text_lower()
+            .get(self.normalized_start as usize..self.normalized_end as usize)
+            .unwrap_or_else(|| python_trim(self.text_lower()))
+    }
+
     fn match_flex_score(&self, query: &[char], query_ascii: Option<&[u8]>) -> Option<i64> {
         if self.ascii {
             if let Some(query_ascii) = query_ascii {
                 return match_flex_ascii(
                     query_ascii,
                     self.text.as_bytes(),
-                    self.text_lower.as_bytes(),
+                    self.text_lower().as_bytes(),
                 );
             }
         }
@@ -236,7 +275,7 @@ impl NativeCandidate {
         }
         if query.len() == 1 {
             let position = self
-                .text_lower
+                .text_lower()
                 .chars()
                 .position(|character| character == query[0])?;
             let boundary_bonus = if position == 0 {
@@ -264,7 +303,7 @@ impl NativeCandidate {
         let mut gap_penalty = 0_i64;
         let mut boundary_bonus = 0_i64;
 
-        for (position, candidate_character) in self.text_lower.chars().enumerate() {
+        for (position, candidate_character) in self.text_lower().chars().enumerate() {
             if candidate_character != query[query_index] {
                 continue;
             }
@@ -321,6 +360,7 @@ impl NativeCandidate {
 #[pyclass]
 struct NativeHistory {
     candidates: VecDeque<NativeCandidate>,
+    cwd_interner: HashSet<Arc<str>>,
     daemon_query_cache: Mutex<DaemonQueryCache>,
 }
 
@@ -388,7 +428,7 @@ impl DaemonQueryCache {
     }
 }
 
-type CandidateInput = (String, String, String, Option<String>, Vec<String>, bool);
+type CandidateInput = (String, String, Option<String>, Vec<String>, bool);
 
 struct RankedMatch {
     index: usize,
@@ -750,7 +790,36 @@ fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
     true
 }
 
+fn intern_cwd(cwd_interner: &mut HashSet<Arc<str>>, cwd: Option<String>) -> Option<Arc<str>> {
+    let cwd = cwd?;
+    if let Some(interned) = cwd_interner.get(cwd.as_str()) {
+        return Some(Arc::clone(interned));
+    }
+    let interned: Arc<str> = Arc::from(cwd);
+    cwd_interner.insert(Arc::clone(&interned));
+    Some(interned)
+}
+
+fn candidate_from_input(
+    input: CandidateInput,
+    cwd_interner: &mut HashSet<Arc<str>>,
+) -> NativeCandidate {
+    let (text, text_lower, cwd, words, failed) = input;
+    NativeCandidate::new(
+        text,
+        text_lower,
+        intern_cwd(cwd_interner, cwd),
+        words,
+        failed,
+    )
+}
+
 impl NativeHistory {
+    fn prune_cwd_interner(&mut self) {
+        self.cwd_interner
+            .retain(|cwd| Arc::strong_count(cwd) > 1);
+    }
+
     fn serialize_ranked_response(
         &self,
         selected: &[(usize, i64)],
@@ -788,7 +857,7 @@ impl NativeHistory {
         &self,
         candidate_indices: Option<&[usize]>,
         limit: Option<usize>,
-        current_cwd: Option<&str>,
+        current_cwd: Option<&Arc<str>>,
     ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
         let matched_count = candidate_indices.map_or(self.candidates.len(), |indices| {
             indices
@@ -807,7 +876,10 @@ impl NativeHistory {
                     return false;
                 };
                 if let Some(required) = same_cwd_required {
-                    let same_cwd = candidate.cwd.as_deref() == current_cwd;
+                    let same_cwd = current_cwd
+                        .is_some_and(|cwd| candidate.cwd.as_ref().is_some_and(|candidate_cwd| {
+                            Arc::ptr_eq(candidate_cwd, cwd)
+                        }));
                     if same_cwd != required {
                         return false;
                     }
@@ -849,14 +921,14 @@ impl NativeHistory {
 impl NativeHistory {
     #[new]
     fn new(candidates: Vec<CandidateInput>) -> Self {
-        let candidates: VecDeque<_> = candidates
+        let mut cwd_interner = HashSet::new();
+        let candidates = candidates
             .into_iter()
-            .map(|(text, text_lower, normalized_text, cwd, words, failed)| {
-                NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
-            })
+            .map(|input| candidate_from_input(input, &mut cwd_interner))
             .collect();
         Self {
             candidates,
+            cwd_interner,
             daemon_query_cache: Mutex::new(DaemonQueryCache::default()),
         }
     }
@@ -885,17 +957,43 @@ impl NativeHistory {
         )
     }
 
+    /// Report compact-storage details for regression tests and diagnostics.
+    fn candidate_storage_stats(&self) -> (usize, usize, usize, usize, usize) {
+        let lowercase_allocations = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.text_lower.is_some())
+            .count();
+        let lowercase_bytes = self
+            .candidates
+            .iter()
+            .filter_map(|candidate| candidate.text_lower.as_deref())
+            .map(str::len)
+            .sum();
+        let cwd_references = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.cwd.is_some())
+            .count();
+        (
+            self.candidates.len(),
+            lowercase_allocations,
+            lowercase_bytes,
+            self.cwd_interner.len(),
+            cwd_references,
+        )
+    }
+
     /// Append a batch while initially loading a large history.
     fn extend(&mut self, candidates: Vec<CandidateInput>) {
         self.daemon_query_cache
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
-        self.candidates.extend(candidates.into_iter().map(
-            |(text, text_lower, normalized_text, cwd, words, failed)| {
-                NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
-            },
-        ));
+        for input in candidates {
+            self.candidates
+                .push_back(candidate_from_input(input, &mut self.cwd_interner));
+        }
     }
 
     fn truncate(&mut self, length: usize) {
@@ -907,6 +1005,7 @@ impl NativeHistory {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         self.candidates.truncate(length);
+        self.prune_cwd_interner();
     }
 
     /// Update metadata for one SQLite row without rebuilding or reordering history.
@@ -933,7 +1032,7 @@ impl NativeHistory {
         {
             let replaced_pairs: HashSet<(&str, Option<&str>)> = candidates
                 .iter()
-                .map(|candidate| (candidate.0.as_str(), candidate.3.as_deref()))
+                .map(|candidate| (candidate.0.as_str(), candidate.2.as_deref()))
                 .collect();
             let mut index = 0;
             while index < self.candidates.len() {
@@ -947,18 +1046,11 @@ impl NativeHistory {
                 }
             }
         }
-        for (text, text_lower, normalized_text, cwd, words, failed) in
-            candidates.into_iter().rev()
-        {
-            self.candidates.push_front(NativeCandidate::new(
-                text,
-                text_lower,
-                normalized_text,
-                cwd,
-                words,
-                failed,
-            ));
+        for input in candidates.into_iter().rev() {
+            self.candidates
+                .push_front(candidate_from_input(input, &mut self.cwd_interner));
         }
+        self.prune_cwd_interner();
     }
 
     fn flex_match_many(
@@ -1006,12 +1098,15 @@ impl NativeHistory {
         limit: Option<usize>,
         max_returned_indices: usize,
     ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
+        let current_cwd = current_cwd
+            .as_deref()
+            .and_then(|cwd| self.cwd_interner.get(cwd).cloned());
         if query_lower.is_empty() {
             return py.allow_threads(|| {
                 self.search_empty_ranked(
                     candidate_indices.as_deref(),
                     limit,
-                    current_cwd.as_deref(),
+                    current_cwd.as_ref(),
                 )
             });
         }
@@ -1031,7 +1126,7 @@ impl NativeHistory {
                 let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
                     return;
                 };
-                if !normalized_query.is_empty() && candidate.normalized_text == normalized_query {
+                if !normalized_query.is_empty() && candidate.normalized_text() == normalized_query {
                     return;
                 }
 
@@ -1053,10 +1148,13 @@ impl NativeHistory {
                     .count();
                 max_prefix_word_count = max_prefix_word_count.max(prefix_word_count);
                 let words_in_order =
-                    words_appear_in_order(&ordered_query_words, &candidate.text_lower);
-                let same_cwd = current_cwd
-                    .as_deref()
-                    .is_some_and(|cwd| candidate.cwd.as_deref() == Some(cwd));
+                    words_appear_in_order(&ordered_query_words, candidate.text_lower());
+                let same_cwd = current_cwd.as_ref().is_some_and(|cwd| {
+                    candidate
+                        .cwd
+                        .as_ref()
+                        .is_some_and(|candidate_cwd| Arc::ptr_eq(candidate_cwd, cwd))
+                });
                 let inner_bucket = match (words_in_order, same_cwd) {
                     (true, true) => 0,
                     (true, false) => 1,
