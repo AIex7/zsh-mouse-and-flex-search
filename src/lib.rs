@@ -3,17 +3,20 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::Mutex;
 use std::time::Duration;
 
 mod syntax_highlighting;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
 const MAX_DAEMON_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DAEMON_QUERY_CACHE_ENTRIES: usize = 64;
+const MAX_DAEMON_QUERY_CACHE_INDICES: usize = 1_000_000;
 
 fn is_word_boundary_byte(byte: u8) -> bool {
     matches!(byte, b' ' | b'_' | b'-' | b'/' | b'.' | b':')
@@ -318,6 +321,71 @@ impl NativeCandidate {
 #[pyclass]
 struct NativeHistory {
     candidates: Vec<NativeCandidate>,
+    daemon_query_cache: Mutex<DaemonQueryCache>,
+}
+
+#[derive(Default)]
+struct DaemonQueryCache {
+    entries: HashMap<String, Vec<usize>>,
+    order: VecDeque<String>,
+    total_indices: usize,
+}
+
+impl DaemonQueryCache {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.total_indices = 0;
+    }
+
+    fn candidates_for(&mut self, query: &str) -> Option<Vec<usize>> {
+        let mut prefix_end = query.len();
+        while prefix_end > 0 {
+            prefix_end = query[..prefix_end]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index);
+            if prefix_end == 0 {
+                break;
+            }
+            let prefix = &query[..prefix_end];
+            if let Some(indices) = self.entries.get(prefix) {
+                let indices = indices.clone();
+                if let Some(position) = self.order.iter().position(|key| key == prefix) {
+                    self.order.remove(position);
+                }
+                self.order.push_back(prefix.to_owned());
+                return Some(indices);
+            }
+        }
+        None
+    }
+
+    fn insert(&mut self, query: &str, indices: Vec<usize>) {
+        if query.is_empty() || indices.len() > MAX_DAEMON_QUERY_CACHE_INDICES {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(query) {
+            self.total_indices -= previous.len();
+            if let Some(position) = self.order.iter().position(|key| key == query) {
+                self.order.remove(position);
+            }
+        }
+        while !self.order.is_empty()
+            && (self.order.len() >= MAX_DAEMON_QUERY_CACHE_ENTRIES
+                || self.total_indices + indices.len() > MAX_DAEMON_QUERY_CACHE_INDICES)
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.total_indices -= removed.len();
+            }
+        }
+        self.total_indices += indices.len();
+        self.entries.insert(query.to_owned(), indices);
+        self.order.push_back(query.to_owned());
+    }
 }
 
 type CandidateInput = (String, String, String, Option<String>, Vec<String>, bool);
@@ -683,6 +751,37 @@ fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
 }
 
 impl NativeHistory {
+    fn serialize_ranked_response(
+        &self,
+        selected: &[(usize, i64)],
+        matched_indices: Option<&[usize]>,
+        matched_count: usize,
+    ) -> PyResult<String> {
+        let history_results = selected
+            .iter()
+            .map(|(index, score)| {
+                let candidate = &self.candidates[*index];
+                HistoryResultPayload {
+                    text: &candidate.text,
+                    score: *score,
+                    exact: false,
+                    recency: -(*index as i64),
+                    cwd: candidate.cwd.as_deref(),
+                    failed: candidate.failed,
+                    words: &candidate.words,
+                }
+            })
+            .collect();
+        let response = SearchResponsePayload {
+            ok: true,
+            history_results,
+            matched_indices,
+            matched_indices_omitted: matched_indices.is_none(),
+            matched_count,
+        };
+        serde_json::to_string(&response).map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
     /// Select an empty-query result page without constructing one ranked item
     /// per history entry. Empty queries only rank by cwd and recency.
     fn search_empty_ranked(
@@ -756,15 +855,42 @@ impl NativeHistory {
                 NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
             })
             .collect();
-        Self { candidates }
+        Self {
+            candidates,
+            daemon_query_cache: Mutex::new(DaemonQueryCache::default()),
+        }
     }
 
     fn __len__(&self) -> usize {
         self.candidates.len()
     }
 
+    fn clear_daemon_query_cache(&self) {
+        self.daemon_query_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    fn daemon_query_cache_stats(&self) -> (usize, usize, usize, usize) {
+        let cache = self
+            .daemon_query_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            cache.entries.len(),
+            cache.total_indices,
+            MAX_DAEMON_QUERY_CACHE_ENTRIES,
+            MAX_DAEMON_QUERY_CACHE_INDICES,
+        )
+    }
+
     /// Append a batch while initially loading a large history.
     fn extend(&mut self, candidates: Vec<CandidateInput>) {
+        self.daemon_query_cache
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         self.candidates.extend(candidates.into_iter().map(
             |(text, text_lower, normalized_text, cwd, words, failed)| {
                 NativeCandidate::new(text, text_lower, normalized_text, cwd, words, failed)
@@ -780,6 +906,10 @@ impl NativeHistory {
         if candidates.is_empty() {
             return;
         }
+        self.daemon_query_cache
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         {
             let replaced_pairs: HashSet<(&str, Option<&str>)> = candidates
                 .iter()
@@ -1005,29 +1135,56 @@ impl NativeHistory {
             limit,
             max_returned_indices,
         );
-        let history_results = selected
-            .iter()
-            .map(|(index, score)| {
-                let candidate = &self.candidates[*index];
-                HistoryResultPayload {
-                    text: &candidate.text,
-                    score: *score,
-                    exact: false,
-                    recency: -(*index as i64),
-                    cwd: candidate.cwd.as_deref(),
-                    failed: candidate.failed,
-                    words: &candidate.words,
-                }
-            })
-            .collect();
-        let response = SearchResponsePayload {
-            ok: true,
-            history_results,
-            matched_indices: matched_indices.as_deref(),
-            matched_indices_omitted: matched_indices.is_none(),
+        self.serialize_ranked_response(
+            &selected,
+            matched_indices.as_deref(),
             matched_count,
+        )
+    }
+
+    /// Cache the complete match set in-process and omit it from the serialized
+    /// daemon response sent to the client.
+    #[allow(clippy::too_many_arguments)]
+    fn search_response_json_for_daemon(
+        &self,
+        py: Python<'_>,
+        query_lower: &str,
+        normalized_query: &str,
+        prefix_query_words: Vec<String>,
+        ordered_query_words: Vec<String>,
+        current_cwd: Option<String>,
+        candidate_indices: Option<Vec<usize>>,
+        limit: Option<usize>,
+    ) -> PyResult<String> {
+        let cache_enabled = candidate_indices.is_none() && !query_lower.is_empty();
+        let cached_indices = if cache_enabled {
+            self.daemon_query_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .candidates_for(query_lower)
+        } else {
+            None
         };
-        serde_json::to_string(&response).map_err(|error| PyValueError::new_err(error.to_string()))
+        let (selected, matched_indices, matched_count) = self.search_ranked(
+            py,
+            query_lower,
+            normalized_query,
+            prefix_query_words,
+            ordered_query_words,
+            current_cwd,
+            candidate_indices.or(cached_indices),
+            limit,
+            usize::MAX,
+        );
+        if cache_enabled {
+            if let Some(indices) = matched_indices {
+                self.daemon_query_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(query_lower, indices);
+            }
+        }
+        self.serialize_ranked_response(&selected, None, matched_count)
     }
 }
 

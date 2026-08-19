@@ -1157,6 +1157,27 @@ def native_history_response_json(
     )
 
 
+def native_history_response_json_for_daemon(
+    query: str,
+    native_candidates: Any,
+    *,
+    candidate_indices: Optional[Sequence[int]] = None,
+    limit: Optional[int] = None,
+    current_cwd: Optional[str] = None,
+) -> str:
+    """Serialize results and retain complete matches inside the daemon."""
+    result_limit = limit if (limit is None or limit > 0) else None
+    return native_candidates.search_response_json_for_daemon(
+        query.lower(),
+        query.strip().lower(),
+        shell_words_for_matching(query),
+        query.lower().split(),
+        current_cwd,
+        candidate_indices,
+        result_limit,
+    )
+
+
 def history_entry_refresh_key(entry: HistoryEntry) -> tuple[Optional[str], str, Optional[str], bool]:
     return entry.timestamp, entry.text, entry.cwd, entry.failed
 
@@ -1216,6 +1237,7 @@ class DaemonHistoryState:
         self.recent_entries = []
 
     def refresh(self) -> None:
+        self.native_candidates.clear_daemon_query_cache()
         if not self.use_custom_history:
             self._rebuild_native()
             return
@@ -1257,10 +1279,18 @@ class DaemonHistoryState:
         limit: Optional[int],
         current_cwd: Optional[str],
     ) -> str:
-        return native_history_response_json(
+        if candidate_indices is not None:
+            return native_history_response_json(
+                query,
+                self.native_candidates,
+                candidate_indices=candidate_indices,
+                limit=limit,
+                current_cwd=current_cwd,
+            )
+
+        return native_history_response_json_for_daemon(
             query,
             self.native_candidates,
-            candidate_indices=candidate_indices,
             limit=limit,
             current_cwd=current_cwd,
         )

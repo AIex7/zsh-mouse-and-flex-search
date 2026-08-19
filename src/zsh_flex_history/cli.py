@@ -925,15 +925,6 @@ def run(
             runtime_completion_cache: dict[tuple[str, int], list[MatchResult]] = {}
             render_line_cache: dict[tuple[object, ...], str] = {}
 
-            def search_candidates_for(query_text: str) -> Optional[Sequence[int]]:
-                prefix = query_text[:-1]
-                while prefix:
-                    cached = match_cache.get(prefix)
-                    if cached is not None and cached[0] is not None:
-                        return cached[0]
-                    prefix = prefix[:-1]
-                return None
-
             def run_search_request(
                 query_text: str,
                 candidate_indices: Optional[Sequence[int]],
@@ -1321,7 +1312,9 @@ def run(
                         displayed_total_count = total_count
                     else:
                         if queued_search_key != cache_key:
-                            search_requests.put((cache_key, search_candidates_for(cache_key), current_cwd_text))
+                            # Incremental candidate filtering stays in the daemon;
+                            # never serialize cached index arrays through the socket.
+                            search_requests.put((cache_key, None, current_cwd_text))
                             queued_search_key = cache_key
                         matched_indices = displayed_matched_indices
                         results = filter_exact_query_match(query, displayed_results)
