@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import random
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from zsh_flex_history import syntax_highlighting
@@ -27,6 +30,24 @@ def editing_sequence(command: str) -> list[str]:
 
 
 class SyntaxHighlightingTests(unittest.TestCase):
+    def test_path_executables_are_loaded_once_for_successive_prefixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            executable = Path(temporary_directory) / "example-command"
+            executable.touch()
+            executable.chmod(0o755)
+            syntax_highlighting._path_executable_names.cache_clear()
+
+            with (
+                patch.dict(os.environ, {"PATH": temporary_directory}),
+                patch.object(os, "scandir", wraps=os.scandir) as scandir,
+            ):
+                self.assertTrue(syntax_highlighting._is_valid_command("example-command"))
+                self.assertTrue(syntax_highlighting._is_known_command_prefix("exa"))
+                self.assertTrue(syntax_highlighting._is_known_command_prefix("exam"))
+                self.assertTrue(syntax_highlighting._is_known_command_prefix("example-"))
+
+            self.assertEqual(scandir.call_count, 1)
+
     def test_compact_native_token_styles_match_named_styles(self) -> None:
         for token_id, token_name in enumerate(syntax_highlighting.TOKEN_NAMES):
             self.assertEqual(

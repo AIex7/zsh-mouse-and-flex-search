@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from functools import lru_cache
 import os
 import re
-import shutil
 from typing import Optional
 
 from ._flex_match import NativeIncrementalHighlighter as _NativeIncrementalHighlighter
@@ -195,9 +195,51 @@ def _command_state(word: str, word_complete: bool) -> str:
     return "pending"
 
 
-@lru_cache(maxsize=4096)
-def _which_cached(path_env: str, word: str) -> str | None:
-    return shutil.which(word, path=path_env)
+def _path_cache_cwd(path_env: str) -> str:
+    """Include cwd in the cache key only when PATH resolution depends on it."""
+    if all(
+        path_dir and os.path.isabs(path_dir)
+        for path_dir in path_env.split(os.pathsep)
+    ):
+        return ""
+    try:
+        return os.getcwd()
+    except OSError:
+        return ""
+
+
+@lru_cache(maxsize=16)
+def _path_executable_names(path_env: str, cwd: str) -> tuple[str, ...]:
+    """Load executable names once for a PATH value and relevant cwd."""
+    names: set[str] = set()
+    scanned_directories: set[str] = set()
+    for path_dir in path_env.split(os.pathsep):
+        resolved_dir = path_dir or cwd or "."
+        if not os.path.isabs(resolved_dir) and cwd:
+            resolved_dir = os.path.join(cwd, resolved_dir)
+        if resolved_dir in scanned_directories:
+            continue
+        scanned_directories.add(resolved_dir)
+        try:
+            with os.scandir(resolved_dir) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file() and os.access(entry.path, os.X_OK):
+                            names.add(entry.name)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return tuple(sorted(names))
+
+
+def _path_executables(path_env: str) -> tuple[str, ...]:
+    return _path_executable_names(path_env, _path_cache_cwd(path_env))
+
+
+def _sorted_names_contain(names: tuple[str, ...], word: str) -> bool:
+    index = bisect_left(names, word)
+    return index < len(names) and names[index] == word
 
 
 def _is_valid_command(word: str) -> bool:
@@ -206,7 +248,8 @@ def _is_valid_command(word: str) -> bool:
     if "/" in word:
         path = os.path.expanduser(word)
         return os.path.isfile(path) and os.access(path, os.X_OK)
-    return _which_cached(os.environ.get("PATH", ""), word) is not None
+    path_env = os.environ.get("PATH", "")
+    return _sorted_names_contain(_path_executables(path_env), word)
 
 
 def _is_known_command_prefix(prefix: str) -> bool:
@@ -244,23 +287,9 @@ def _is_existing_path_prefix(text: str) -> bool:
     return False
 
 
-@lru_cache(maxsize=4096)
 def _path_has_prefix(path_env: str, prefix: str) -> bool:
     if not prefix:
         return False
-    for path_dir in path_env.split(os.pathsep):
-        if not path_dir:
-            continue
-        try:
-            with os.scandir(path_dir) as entries:
-                for entry in entries:
-                    if not entry.name.startswith(prefix):
-                        continue
-                    try:
-                        if entry.is_file() and os.access(entry.path, os.X_OK):
-                            return True
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return False
+    names = _path_executables(path_env)
+    index = bisect_left(names, prefix)
+    return index < len(names) and names[index].startswith(prefix)
