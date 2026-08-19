@@ -685,6 +685,70 @@ fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
     true
 }
 
+impl NativeHistory {
+    /// Select an empty-query result page without constructing one ranked item
+    /// per history entry. Empty queries only rank by cwd and recency.
+    fn search_empty_ranked(
+        &self,
+        candidate_indices: Option<&[usize]>,
+        limit: Option<usize>,
+        current_cwd: Option<&str>,
+    ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
+        let matched_count = candidate_indices.map_or(self.candidates.len(), |indices| {
+            indices
+                .iter()
+                .filter(|&&index| index < self.candidates.len())
+                .count()
+        });
+        let result_limit = limit.unwrap_or(usize::MAX);
+        let capacity = result_limit.min(matched_count);
+        let mut selected = Vec::with_capacity(capacity);
+        let mut seen = HashSet::with_capacity(capacity);
+
+        let mut collect_pass = |same_cwd_required: Option<bool>| -> bool {
+            let mut collect_candidate = |index: usize| -> bool {
+                let Some(candidate) = self.candidates.get(index) else {
+                    return false;
+                };
+                if let Some(required) = same_cwd_required {
+                    let same_cwd = candidate.cwd.as_deref() == current_cwd;
+                    if same_cwd != required {
+                        return false;
+                    }
+                }
+                if selected.len() < result_limit && seen.insert(candidate.text.as_str()) {
+                    selected.push((index, 0));
+                }
+                selected.len() >= result_limit
+            };
+
+            if let Some(indices) = candidate_indices {
+                for &index in indices {
+                    if collect_candidate(index) {
+                        return true;
+                    }
+                }
+            } else {
+                for index in 0..self.candidates.len() {
+                    if collect_candidate(index) {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        if current_cwd.is_some() {
+            if !collect_pass(Some(true)) {
+                collect_pass(Some(false));
+            }
+        } else {
+            collect_pass(None);
+        }
+        (selected, None, matched_count)
+    }
+}
+
 #[pymethods]
 impl NativeHistory {
     #[new]
@@ -781,15 +845,21 @@ impl NativeHistory {
         limit: Option<usize>,
         max_returned_indices: usize,
     ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
+        if query_lower.is_empty() {
+            return py.allow_threads(|| {
+                self.search_empty_ranked(
+                    candidate_indices.as_deref(),
+                    limit,
+                    current_cwd.as_deref(),
+                )
+            });
+        }
+
         let query = compact_query(query_lower);
         let query_ascii = ascii_query(&query);
         py.allow_threads(|| {
             let mut matches = Vec::new();
-            let mut matched_indices = if query_lower.is_empty() {
-                None
-            } else {
-                Some(Vec::new())
-            };
+            let mut matched_indices = Some(Vec::new());
             let mut matched_count = 0;
             let mut max_prefix_word_count = 0_u32;
 
