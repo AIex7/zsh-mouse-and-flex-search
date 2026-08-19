@@ -716,6 +716,9 @@ def update_custom_history_exit_status(
             age = datetime.now(timezone.utc) - parsed_timestamp
             if age.total_seconds() < 0 or age.total_seconds() > max_age_seconds:
                 return False
+            if status == 0:
+                conn.commit()
+                return True
             conn.execute(
                 "UPDATE custom_history_metadata SET status_revision = status_revision + 1 WHERE id = 1"
             )
@@ -725,8 +728,8 @@ def update_custom_history_exit_status(
             if not revision_row or not isinstance(revision_row[0], int):
                 return False
             conn.execute(
-                "UPDATE custom_history SET failed = ?, status_revision = ? WHERE id = ?",
-                (1 if status != 0 else 0, revision_row[0], row_id),
+                "UPDATE custom_history SET failed = 1, status_revision = ? WHERE id = ?",
+                (revision_row[0], row_id),
             )
             conn.commit()
     except (OSError, sqlite3.Error):
@@ -1356,14 +1359,27 @@ class DaemonHistoryState:
             (record for record in records if record.row_id == watermark.row_id),
             None,
         )
-        if anchor is None or (
-            anchor.entry.text,
-            anchor.entry.cwd,
-            anchor.entry.timestamp,
-        ) != (
-            watermark.entry.text,
-            watermark.entry.cwd,
-            watermark.entry.timestamp,
+        watermark_replaced = False
+        if anchor is None and records:
+            watermark_replaced = any(
+                record.row_id > watermark.row_id
+                and record.entry.text == watermark.entry.text
+                and record.entry.cwd == watermark.entry.cwd
+                for record in records
+            )
+
+        if (anchor is None and not watermark_replaced) or (
+            anchor is not None
+            and (
+                anchor.entry.text,
+                anchor.entry.cwd,
+                anchor.entry.timestamp,
+            )
+            != (
+                watermark.entry.text,
+                watermark.entry.cwd,
+                watermark.entry.timestamp,
+            )
         ):
             self._rebuild_native()
             return

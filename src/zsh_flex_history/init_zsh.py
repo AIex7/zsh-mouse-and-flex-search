@@ -34,13 +34,15 @@ _zsh_flex_history_precmd() {
   local zsh_flex_history_bin="${ZSH_FLEX_HISTORY_BIN:-${commands[zsh-flex-history]:-zsh-flex-history}}"
   [[ -z "${_zsh_flex_history_last_cmd:-}" ]] && return
 
-  "$zsh_flex_history_bin" \\
-    --use-custom-history \\
-    --record-status \\
-    --status-code "$exit_status" \\
-    --status-cwd "${_zsh_flex_history_last_cwd:-$PWD}" \\
-    --status-command "$_zsh_flex_history_last_cmd" \\
-    >/dev/null 2>&1 || true
+  if (( exit_status != 0 )); then
+    "$zsh_flex_history_bin" \\
+      --use-custom-history \\
+      --record-status \\
+      --status-code "$exit_status" \\
+      --status-cwd "${_zsh_flex_history_last_cwd:-$PWD}" \\
+      --status-command "$_zsh_flex_history_last_cmd" \\
+      >/dev/null 2>&1 || true
+  fi
 
   unset _zsh_flex_history_last_cmd
   unset _zsh_flex_history_last_cwd
