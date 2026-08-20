@@ -11,6 +11,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 mod syntax_highlighting;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
@@ -53,14 +59,78 @@ fn ascii_query(query: &[char]) -> Option<Vec<u8>> {
         .collect()
 }
 
+#[inline(always)]
+fn find_byte_simd(slice: &[u8], target: u8) -> Option<usize> {
+    if slice.len() < 16 {
+        return slice.iter().position(|&b| b == target);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let target_vec = vdupq_n_u8(target);
+        let chunks = slice.chunks_exact(16);
+        let remainder = chunks.remainder();
+        let mut offset = 0;
+
+        for chunk in chunks {
+            let chunk_vec = vld1q_u8(chunk.as_ptr());
+            let cmp = vceqq_u8(chunk_vec, target_vec);
+            if vmaxvq_u8(cmp) != 0 {
+                for (i, &b) in chunk.iter().enumerate() {
+                    if b == target {
+                        return Some(offset + i);
+                    }
+                }
+            }
+            offset += 16;
+        }
+
+        for (i, &b) in remainder.iter().enumerate() {
+            if b == target {
+                return Some(offset + i);
+            }
+        }
+        None
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    unsafe {
+        let target_vec = _mm_set1_epi8(target as i8);
+        let chunks = slice.chunks_exact(16);
+        let remainder = chunks.remainder();
+        let mut offset = 0;
+
+        for chunk in chunks {
+            let chunk_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
+            let cmp = _mm_cmpeq_epi8(chunk_vec, target_vec);
+            let mask = _mm_movemask_epi8(cmp);
+            if mask != 0 {
+                let bit = mask.trailing_zeros() as usize;
+                return Some(offset + bit);
+            }
+            offset += 16;
+        }
+
+        for (i, &b) in remainder.iter().enumerate() {
+            if b == target {
+                return Some(offset + i);
+            }
+        }
+        None
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "sse2"))))]
+    {
+        slice.iter().position(|&b| b == target)
+    }
+}
+
 fn match_flex_ascii(query: &[u8], candidate: &[u8], candidate_lower: &[u8]) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }
     if query.len() == 1 {
-        let position = candidate_lower
-            .iter()
-            .position(|character| *character == query[0])?;
+        let position = find_byte_simd(candidate_lower, query[0])?;
         let boundary_bonus = if position == 0 {
             12
         } else if is_word_boundary_byte(candidate[position - 1]) {
@@ -73,17 +143,24 @@ fn match_flex_ascii(query: &[u8], candidate: &[u8], candidate_lower: &[u8]) -> O
         );
     }
 
-    let mut query_index = 0;
     let mut first = 0;
     let mut previous = 0;
     let mut contiguous = 0_i64;
     let mut gap_penalty = 0_i64;
     let mut boundary_bonus = 0_i64;
+    let mut search_from = 0;
 
-    for (position, candidate_character) in candidate_lower.iter().copied().enumerate() {
-        if candidate_character != query[query_index] {
-            continue;
+    for (query_index, &target) in query.iter().enumerate() {
+        if search_from >= candidate_lower.len() {
+            return None;
         }
+
+        let position = if candidate_lower[search_from] == target {
+            search_from
+        } else {
+            search_from + find_byte_simd(&candidate_lower[search_from..], target)?
+        };
+
         if query_index == 0 {
             first = position;
             if position == 0 {
@@ -103,19 +180,17 @@ fn match_flex_ascii(query: &[u8], candidate: &[u8], candidate_lower: &[u8]) -> O
         }
 
         previous = position;
-        query_index += 1;
-        if query_index == query.len() {
-            let span = previous - first + 1;
-            let start_bonus = (30_i64 - first as i64).max(0);
-            let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
-            return Some(
-                contiguous + boundary_bonus + start_bonus + compact_bonus
-                    - gap_penalty
-                    - (candidate.len() / 8) as i64,
-            );
-        }
+        search_from = position + 1;
     }
-    None
+
+    let span = previous - first + 1;
+    let start_bonus = (30_i64 - first as i64).max(0);
+    let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
+    Some(
+        contiguous + boundary_bonus + start_bonus + compact_bonus
+            - gap_penalty
+            - (candidate.len() / 8) as i64,
+    )
 }
 
 /// Return the existing Python flex match score without retaining match positions.
@@ -190,12 +265,6 @@ fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<
     }
     None
 }
-
-#[cfg(target_arch = "aarch64")]
-use std::arch::aarch64::*;
-
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 
 #[inline(always)]
 fn compute_char_mask_ascii(bytes: &[u8]) -> u128 {
