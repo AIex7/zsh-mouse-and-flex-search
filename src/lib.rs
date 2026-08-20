@@ -191,6 +191,12 @@ fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<
     None
 }
 
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 #[inline(always)]
 fn compute_char_mask_ascii(bytes: &[u8]) -> u128 {
     let mut mask = 0u128;
@@ -224,6 +230,114 @@ fn compute_query_char_mask(query: &[char]) -> u128 {
         }
     }
     mask
+}
+
+#[inline(always)]
+fn scan_char_masks(
+    slice: &[u128],
+    base_offset: usize,
+    query_mask: u128,
+    mut on_match: impl FnMut(usize),
+) {
+    if query_mask == 0 {
+        for i in 0..slice.len() {
+            on_match(base_offset + i);
+        }
+        return;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let q_bytes = query_mask.to_ne_bytes();
+        let q_vec = vld1q_u8(q_bytes.as_ptr());
+        let chunks = slice.chunks_exact(4);
+        let remainder = chunks.remainder();
+        let mut base = base_offset;
+
+        for chunk in chunks {
+            let ptr = chunk.as_ptr();
+            let m0 = vld1q_u8(ptr as *const u8);
+            let m1 = vld1q_u8(ptr.add(1) as *const u8);
+            let m2 = vld1q_u8(ptr.add(2) as *const u8);
+            let m3 = vld1q_u8(ptr.add(3) as *const u8);
+
+            let c0 = vceqq_u8(vandq_u8(m0, q_vec), q_vec);
+            let c1 = vceqq_u8(vandq_u8(m1, q_vec), q_vec);
+            let c2 = vceqq_u8(vandq_u8(m2, q_vec), q_vec);
+            let c3 = vceqq_u8(vandq_u8(m3, q_vec), q_vec);
+
+            if vminvq_u8(c0) == 0xFF {
+                on_match(base);
+            }
+            if vminvq_u8(c1) == 0xFF {
+                on_match(base + 1);
+            }
+            if vminvq_u8(c2) == 0xFF {
+                on_match(base + 2);
+            }
+            if vminvq_u8(c3) == 0xFF {
+                on_match(base + 3);
+            }
+            base += 4;
+        }
+
+        for &mask in remainder {
+            let m = vld1q_u8((&mask as *const u128) as *const u8);
+            let c = vceqq_u8(vandq_u8(m, q_vec), q_vec);
+            if vminvq_u8(c) == 0xFF {
+                on_match(base);
+            }
+            base += 1;
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+    unsafe {
+        let q_bytes = query_mask.to_ne_bytes();
+        let q_vec = _mm_loadu_si128(q_bytes.as_ptr() as *const __m128i);
+        let chunks = slice.chunks_exact(4);
+        let remainder = chunks.remainder();
+        let mut base = base_offset;
+
+        for chunk in chunks {
+            let ptr = chunk.as_ptr() as *const __m128i;
+            let m0 = _mm_loadu_si128(ptr);
+            let m1 = _mm_loadu_si128(ptr.add(1));
+            let m2 = _mm_loadu_si128(ptr.add(2));
+            let m3 = _mm_loadu_si128(ptr.add(3));
+
+            if _mm_testc_si128(m0, q_vec) != 0 {
+                on_match(base);
+            }
+            if _mm_testc_si128(m1, q_vec) != 0 {
+                on_match(base + 1);
+            }
+            if _mm_testc_si128(m2, q_vec) != 0 {
+                on_match(base + 2);
+            }
+            if _mm_testc_si128(m3, q_vec) != 0 {
+                on_match(base + 3);
+            }
+            base += 4;
+        }
+
+        for &mask in remainder {
+            let m = _mm_loadu_si128((&mask as *const u128) as *const __m128i);
+            if _mm_testc_si128(m, q_vec) != 0 {
+                on_match(base);
+            }
+            base += 1;
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "sse4.1"))))]
+    {
+        for (i, &mask) in slice.iter().enumerate() {
+            if (mask & query_mask) == query_mask {
+                on_match(base_offset + i);
+            }
+        }
+    }
 }
 
 struct NativeCandidate {
@@ -401,6 +515,7 @@ impl NativeCandidate {
 /// Subsequent searches avoid extracting every Python tuple again.
 #[pyclass]
 struct NativeHistory {
+    char_masks: VecDeque<u128>,
     candidates: VecDeque<NativeCandidate>,
     cwd_interner: HashSet<Arc<str>>,
     daemon_query_cache: Mutex<DaemonQueryCache>,
@@ -962,13 +1077,17 @@ impl NativeHistory {
 #[pymethods]
 impl NativeHistory {
     #[new]
-    fn new(candidates: Vec<CandidateInput>) -> Self {
+    fn new(candidates_input: Vec<CandidateInput>) -> Self {
         let mut cwd_interner = HashSet::new();
-        let candidates = candidates
-            .into_iter()
-            .map(|input| candidate_from_input(input, &mut cwd_interner))
-            .collect();
+        let mut candidates = VecDeque::with_capacity(candidates_input.len());
+        let mut char_masks = VecDeque::with_capacity(candidates_input.len());
+        for input in candidates_input {
+            let candidate = candidate_from_input(input, &mut cwd_interner);
+            char_masks.push_back(candidate.char_mask);
+            candidates.push_back(candidate);
+        }
         Self {
+            char_masks,
             candidates,
             cwd_interner,
             daemon_query_cache: Mutex::new(DaemonQueryCache::default()),
@@ -1033,8 +1152,9 @@ impl NativeHistory {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         for input in candidates {
-            self.candidates
-                .push_back(candidate_from_input(input, &mut self.cwd_interner));
+            let candidate = candidate_from_input(input, &mut self.cwd_interner);
+            self.char_masks.push_back(candidate.char_mask);
+            self.candidates.push_back(candidate);
         }
     }
 
@@ -1046,6 +1166,7 @@ impl NativeHistory {
             .get_mut()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
+        self.char_masks.truncate(length);
         self.candidates.truncate(length);
         self.prune_cwd_interner();
     }
@@ -1082,6 +1203,7 @@ impl NativeHistory {
                 if replaced_pairs
                     .contains(&(candidate.text.as_str(), candidate.cwd.as_deref()))
                 {
+                    self.char_masks.remove(index);
                     self.candidates.remove(index);
                 } else {
                     index += 1;
@@ -1089,8 +1211,9 @@ impl NativeHistory {
             }
         }
         for input in candidates.into_iter().rev() {
-            self.candidates
-                .push_front(candidate_from_input(input, &mut self.cwd_interner));
+            let candidate = candidate_from_input(input, &mut self.cwd_interner);
+            self.char_masks.push_front(candidate.char_mask);
+            self.candidates.push_front(candidate);
         }
         self.prune_cwd_interner();
     }
@@ -1108,27 +1231,33 @@ impl NativeHistory {
             let mut matches = Vec::new();
             if let Some(indices) = candidate_indices.as_deref() {
                 for &index in indices {
+                    let Some(&mask) = self.char_masks.get(index) else {
+                        continue;
+                    };
+                    if (mask & query_mask) != query_mask {
+                        continue;
+                    }
                     let Some(candidate) = self.candidates.get(index) else {
                         continue;
                     };
-                    if (candidate.char_mask & query_mask) != query_mask {
-                        continue;
-                    }
                     if let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref())
                     {
                         matches.push((index, score));
                     }
                 }
             } else {
-                for (index, candidate) in self.candidates.iter().enumerate() {
-                    if (candidate.char_mask & query_mask) != query_mask {
-                        continue;
+                let (slice1, slice2) = self.char_masks.as_slices();
+                let mut check = |index: usize| {
+                    if let Some(candidate) = self.candidates.get(index) {
+                        if let Some(score) =
+                            candidate.match_flex_score(&query, query_ascii.as_deref())
+                        {
+                            matches.push((index, score));
+                        }
                     }
-                    if let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref())
-                    {
-                        matches.push((index, score));
-                    }
-                }
+                };
+                scan_char_masks(slice1, 0, query_mask, &mut check);
+                scan_char_masks(slice2, slice1.len(), query_mask, &mut check);
             }
             matches
         })
@@ -1167,15 +1296,35 @@ impl NativeHistory {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
             let mut matched_indices = Some(Vec::new());
             let mut matched_count = 0;
-            let mut max_prefix_word_count = 0_usize;
+
+            // Phase 1: Fast SIMD Bitmask Index Pre-Filtering
+            let matching_indices = if let Some(indices) = candidate_indices {
+                let mut filtered = Vec::with_capacity(indices.len());
+                for &index in &indices {
+                    let Some(&mask) = self.char_masks.get(index) else {
+                        continue;
+                    };
+                    if (mask & query_mask) == query_mask {
+                        filtered.push(index);
+                    }
+                }
+                filtered
+            } else {
+                let mut collected = Vec::with_capacity(16_384);
+                let (slice1, slice2) = self.char_masks.as_slices();
+                scan_char_masks(slice1, 0, query_mask, |index| {
+                    collected.push(index);
+                });
+                scan_char_masks(slice2, slice1.len(), query_mask, |index| {
+                    collected.push(index);
+                });
+                collected
+            };
 
             let mut check_candidate = |scan_order: usize, index: usize| {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
-                if (candidate.char_mask & query_mask) != query_mask {
-                    return;
-                }
                 let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
                     return;
                 };
@@ -1192,16 +1341,28 @@ impl NativeHistory {
                     }
                 }
 
-                let prefix_word_count = prefix_query_words
-                    .iter()
-                    .zip(&candidate.words)
-                    .take_while(|(query_word, candidate_word)| {
-                        candidate_word.starts_with(query_word.as_str())
-                    })
-                    .count();
-                max_prefix_word_count = max_prefix_word_count.max(prefix_word_count);
-                let words_in_order =
-                    words_appear_in_order(&ordered_query_words, candidate.text_lower());
+                let prefix_word_count = if prefix_query_words.len() == 1 {
+                    if candidate.words.first().is_some_and(|w| w.starts_with(prefix_query_words[0].as_str())) {
+                        1
+                    } else {
+                        0
+                    }
+                } else if prefix_query_words.is_empty() {
+                    0
+                } else {
+                    prefix_query_words
+                        .iter()
+                        .zip(&candidate.words)
+                        .take_while(|(query_word, candidate_word)| {
+                            candidate_word.starts_with(query_word.as_str())
+                        })
+                        .count()
+                };
+                let words_in_order = if ordered_query_words.len() <= 1 {
+                    true
+                } else {
+                    words_appear_in_order(&ordered_query_words, candidate.text_lower())
+                };
                 let same_cwd = current_cwd.as_ref().is_some_and(|cwd| {
                     candidate
                         .cwd
@@ -1226,14 +1387,9 @@ impl NativeHistory {
                 });
             };
 
-            if let Some(indices) = candidate_indices.as_deref() {
-                for (scan_order, &index) in indices.iter().enumerate() {
-                    check_candidate(scan_order, index);
-                }
-            } else {
-                for index in 0..self.candidates.len() {
-                    check_candidate(index, index);
-                }
+            // Phase 2: Candidate Scoring
+            for (scan_order, &index) in matching_indices.iter().enumerate() {
+                check_candidate(scan_order, index);
             }
 
             let result_limit = limit.unwrap_or(usize::MAX);
@@ -1247,6 +1403,7 @@ impl NativeHistory {
                 selected.len() >= result_limit
             };
 
+            let max_prefix_word_count = buckets_by_prefix.len().saturating_sub(1);
             let mut selection_complete = result_limit == 0;
             if !selection_complete {
                 let prefix_buckets = buckets_by_prefix.get(max_prefix_word_count);
