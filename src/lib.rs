@@ -220,6 +220,49 @@ fn compute_char_mask_str(text: &str) -> u128 {
 }
 
 #[inline(always)]
+fn bigram_hash(b1: u32, b2: u32) -> u64 {
+    let val = ((b1 as u64) << 16) | (b2 as u64);
+    let h = val.wrapping_mul(0x9E3779B97F4A7C15);
+    1u64 << ((h >> 58) & 63)
+}
+
+#[inline(always)]
+fn compute_bigram_mask_ascii(bytes: &[u8]) -> u64 {
+    if bytes.len() < 2 {
+        return 0;
+    }
+    let mut mask = 0u64;
+    for i in 0..bytes.len() - 1 {
+        mask |= bigram_hash(bytes[i] as u32, bytes[i + 1] as u32);
+    }
+    mask
+}
+
+#[inline(always)]
+fn compute_bigram_mask_str(text: &str) -> u64 {
+    let mut mask = 0u64;
+    let mut prev: Option<char> = None;
+    for c in text.chars() {
+        if let Some(p) = prev {
+            mask |= bigram_hash(p as u32, c as u32);
+        }
+        prev = Some(c);
+    }
+    mask
+}
+
+#[inline(always)]
+fn compute_words_bigram_mask(words: &[String]) -> u64 {
+    let mut mask = 0u64;
+    for word in words {
+        if word.len() >= 2 {
+            mask |= compute_bigram_mask_str(word);
+        }
+    }
+    mask
+}
+
+#[inline(always)]
 fn compute_query_char_mask(query: &[char]) -> u128 {
     let mut mask = 0u128;
     for &c in query {
@@ -360,7 +403,7 @@ impl NativeCandidate {
         cwd: Option<Arc<str>>,
         words: Vec<String>,
         failed: bool,
-    ) -> (Self, u128) {
+    ) -> (Self, u128, u64) {
         let text_lower = if text_lower == text {
             None
         } else {
@@ -392,6 +435,11 @@ impl NativeCandidate {
         } else {
             compute_char_mask_str(lower)
         };
+        let bigram_mask = if ascii {
+            compute_bigram_mask_ascii(lower.as_bytes())
+        } else {
+            compute_bigram_mask_str(lower)
+        };
         let boxed_words: Box<[Box<str>]> = words.into_iter().map(String::into_boxed_str).collect();
         let candidate = Self {
             text,
@@ -405,7 +453,7 @@ impl NativeCandidate {
             boundary_characters,
             character_count,
         };
-        (candidate, char_mask)
+        (candidate, char_mask, bigram_mask)
     }
 
     fn text_lower(&self) -> &str {
@@ -521,6 +569,7 @@ impl NativeCandidate {
 #[pyclass]
 struct NativeHistory {
     char_masks: VecDeque<u128>,
+    bigram_masks: VecDeque<u64>,
     candidates: VecDeque<NativeCandidate>,
     cwd_interner: HashSet<Arc<str>>,
     daemon_query_cache: Mutex<DaemonQueryCache>,
@@ -965,7 +1014,7 @@ fn intern_cwd(cwd_interner: &mut HashSet<Arc<str>>, cwd: Option<String>) -> Opti
 fn candidate_from_input(
     input: CandidateInput,
     cwd_interner: &mut HashSet<Arc<str>>,
-) -> (NativeCandidate, u128) {
+) -> (NativeCandidate, u128, u64) {
     let (text, text_lower, cwd, words, failed) = input;
     NativeCandidate::new(
         text,
@@ -1086,13 +1135,17 @@ impl NativeHistory {
         let mut cwd_interner = HashSet::new();
         let mut candidates = VecDeque::with_capacity(candidates_input.len());
         let mut char_masks = VecDeque::with_capacity(candidates_input.len());
+        let mut bigram_masks = VecDeque::with_capacity(candidates_input.len());
         for input in candidates_input {
-            let (candidate, mask) = candidate_from_input(input, &mut cwd_interner);
-            char_masks.push_back(mask);
+            let (candidate, char_mask, bigram_mask) =
+                candidate_from_input(input, &mut cwd_interner);
+            char_masks.push_back(char_mask);
+            bigram_masks.push_back(bigram_mask);
             candidates.push_back(candidate);
         }
         Self {
             char_masks,
+            bigram_masks,
             candidates,
             cwd_interner,
             daemon_query_cache: Mutex::new(DaemonQueryCache::default()),
@@ -1157,8 +1210,10 @@ impl NativeHistory {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         for input in candidates {
-            let (candidate, mask) = candidate_from_input(input, &mut self.cwd_interner);
-            self.char_masks.push_back(mask);
+            let (candidate, char_mask, bigram_mask) =
+                candidate_from_input(input, &mut self.cwd_interner);
+            self.char_masks.push_back(char_mask);
+            self.bigram_masks.push_back(bigram_mask);
             self.candidates.push_back(candidate);
         }
     }
@@ -1172,6 +1227,7 @@ impl NativeHistory {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         self.char_masks.truncate(length);
+        self.bigram_masks.truncate(length);
         self.candidates.truncate(length);
         self.prune_cwd_interner();
     }
@@ -1209,6 +1265,7 @@ impl NativeHistory {
                     .contains(&(candidate.text.as_str(), candidate.cwd.as_deref()))
                 {
                     self.char_masks.remove(index);
+                    self.bigram_masks.remove(index);
                     self.candidates.remove(index);
                 } else {
                     index += 1;
@@ -1216,8 +1273,10 @@ impl NativeHistory {
             }
         }
         for input in candidates.into_iter().rev() {
-            let (candidate, mask) = candidate_from_input(input, &mut self.cwd_interner);
-            self.char_masks.push_front(mask);
+            let (candidate, char_mask, bigram_mask) =
+                candidate_from_input(input, &mut self.cwd_interner);
+            self.char_masks.push_front(char_mask);
+            self.bigram_masks.push_front(bigram_mask);
             self.candidates.push_front(candidate);
         }
         self.prune_cwd_interner();
@@ -1234,20 +1293,20 @@ impl NativeHistory {
         let query_mask = compute_query_char_mask(&query);
         py.allow_threads(|| {
             let mut matches = Vec::new();
-            if let Some(indices) = candidate_indices.as_deref() {
-                for &index in indices {
+            if let Some(indices) = candidate_indices {
+                for index in indices {
                     let Some(&mask) = self.char_masks.get(index) else {
                         continue;
                     };
                     if (mask & query_mask) != query_mask {
                         continue;
                     }
-                    let Some(candidate) = self.candidates.get(index) else {
-                        continue;
-                    };
-                    if let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref())
-                    {
-                        matches.push((index, score));
+                    if let Some(candidate) = self.candidates.get(index) {
+                        if let Some(score) =
+                            candidate.match_flex_score(&query, query_ascii.as_deref())
+                        {
+                            matches.push((index, score));
+                        }
                     }
                 }
             } else {
@@ -1297,6 +1356,20 @@ impl NativeHistory {
         let query = compact_query(query_lower);
         let query_ascii = ascii_query(&query);
         let query_mask = compute_query_char_mask(&query);
+        let query_words_bigram_mask = if ordered_query_words.len() > 1
+            || (!ordered_query_words.is_empty() && ordered_query_words[0].len() >= 2)
+        {
+            compute_words_bigram_mask(&ordered_query_words)
+        } else {
+            0
+        };
+        let prefix_bigram_mask =
+            if prefix_query_words.len() == 1 && prefix_query_words[0].len() >= 2 {
+                compute_bigram_mask_str(&prefix_query_words[0])
+            } else {
+                0
+            };
+
         py.allow_threads(|| {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
             let mut matched_indices = Some(Vec::new());
@@ -1323,7 +1396,15 @@ impl NativeHistory {
                 }
 
                 let prefix_word_count = if prefix_query_words.len() == 1 {
-                    if candidate.words.first().is_some_and(|w| w.starts_with(prefix_query_words[0].as_str())) {
+                    let prefix = prefix_query_words[0].as_str();
+                    let has_prefix_match = if prefix_bigram_mask != 0 {
+                        self.bigram_masks
+                            .get(index)
+                            .map_or(true, |&bm| (bm & prefix_bigram_mask) == prefix_bigram_mask)
+                    } else {
+                        true
+                    };
+                    if has_prefix_match && candidate.words.first().is_some_and(|w| w.starts_with(prefix)) {
                         1
                     } else {
                         0
@@ -1341,6 +1422,16 @@ impl NativeHistory {
                 };
                 let words_in_order = if ordered_query_words.len() <= 1 {
                     true
+                } else if query_words_bigram_mask != 0 {
+                    let has_bigram_match = self
+                        .bigram_masks
+                        .get(index)
+                        .map_or(true, |&bm| (bm & query_words_bigram_mask) == query_words_bigram_mask);
+                    if has_bigram_match {
+                        words_appear_in_order(&ordered_query_words, candidate.text_lower())
+                    } else {
+                        false
+                    }
                 } else {
                     words_appear_in_order(&ordered_query_words, candidate.text_lower())
                 };
