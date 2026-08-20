@@ -191,6 +191,41 @@ fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<
     None
 }
 
+#[inline(always)]
+fn compute_char_mask_ascii(bytes: &[u8]) -> u128 {
+    let mut mask = 0u128;
+    for &b in bytes {
+        mask |= 1u128 << (b & 0x7F);
+    }
+    mask
+}
+
+#[inline(always)]
+fn compute_char_mask_str(text: &str) -> u128 {
+    let mut mask = 0u128;
+    for c in text.chars() {
+        if c.is_ascii() {
+            mask |= 1u128 << (c as u8 & 0x7F);
+        } else {
+            mask |= 1u128 << ((c as u32 % 128) as u8);
+        }
+    }
+    mask
+}
+
+#[inline(always)]
+fn compute_query_char_mask(query: &[char]) -> u128 {
+    let mut mask = 0u128;
+    for &c in query {
+        if c.is_ascii() {
+            mask |= 1u128 << (c as u8 & 0x7F);
+        } else {
+            mask |= 1u128 << ((c as u32 % 128) as u8);
+        }
+    }
+    mask
+}
+
 struct NativeCandidate {
     text: String,
     text_lower: Option<Box<str>>,
@@ -202,6 +237,7 @@ struct NativeCandidate {
     ascii: bool,
     boundary_characters: Vec<bool>,
     character_count: usize,
+    char_mask: u128,
 }
 
 impl NativeCandidate {
@@ -236,6 +272,11 @@ impl NativeCandidate {
         } else {
             text.chars().count()
         };
+        let char_mask = if ascii {
+            compute_char_mask_ascii(lower.as_bytes())
+        } else {
+            compute_char_mask_str(lower)
+        };
         Self {
             text,
             text_lower,
@@ -247,6 +288,7 @@ impl NativeCandidate {
             ascii,
             boundary_characters,
             character_count,
+            char_mask,
         }
     }
 
@@ -1061,6 +1103,7 @@ impl NativeHistory {
     ) -> Vec<(usize, i64)> {
         let query = compact_query(query_lower);
         let query_ascii = ascii_query(&query);
+        let query_mask = compute_query_char_mask(&query);
         py.allow_threads(|| {
             let mut matches = Vec::new();
             if let Some(indices) = candidate_indices.as_deref() {
@@ -1068,6 +1111,9 @@ impl NativeHistory {
                     let Some(candidate) = self.candidates.get(index) else {
                         continue;
                     };
+                    if (candidate.char_mask & query_mask) != query_mask {
+                        continue;
+                    }
                     if let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref())
                     {
                         matches.push((index, score));
@@ -1075,6 +1121,9 @@ impl NativeHistory {
                 }
             } else {
                 for (index, candidate) in self.candidates.iter().enumerate() {
+                    if (candidate.char_mask & query_mask) != query_mask {
+                        continue;
+                    }
                     if let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref())
                     {
                         matches.push((index, score));
@@ -1113,6 +1162,7 @@ impl NativeHistory {
 
         let query = compact_query(query_lower);
         let query_ascii = ascii_query(&query);
+        let query_mask = compute_query_char_mask(&query);
         py.allow_threads(|| {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
             let mut matched_indices = Some(Vec::new());
@@ -1123,6 +1173,9 @@ impl NativeHistory {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
+                if (candidate.char_mask & query_mask) != query_mask {
+                    return;
+                }
                 let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
                     return;
                 };

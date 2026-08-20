@@ -528,6 +528,27 @@ def default_custom_history_path() -> Path:
     return default_app_state_dir() / "history.db"
 
 
+def default_history_log_path() -> Path:
+    env_log = os.environ.get("ZSH_FLEX_HISTORY_LOG_FILE")
+    if env_log:
+        return Path(env_log).expanduser()
+    return default_app_state_dir() / "history_rebuild.log"
+
+
+def log_database_load_event(event_type: str, details: str = "", *, log_path: Optional[Path] = None) -> None:
+    target_path = log_path or default_history_log_path()
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        now_str = datetime.now().astimezone().isoformat()
+        msg = f"[{now_str}] {event_type}"
+        if details:
+            msg += f" - {details}"
+        with open(target_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
+
+
 def parse_history_length_arg(raw: str) -> int:
     value = raw.strip().lower().replace("_", "")
     match = re.fullmatch(r"(\d+)([km]?)", value)
@@ -1289,6 +1310,10 @@ class DaemonHistoryState:
                 path,
                 limit=history_length,
             )
+            log_database_load_event(
+                "INITIAL_LOAD",
+                f"path={path} rows={len(native_candidates)} use_custom_history=True",
+            )
             return cls(
                 path,
                 use_custom_history,
@@ -1304,6 +1329,10 @@ class DaemonHistoryState:
             history_length=history_length if use_custom_history else None,
         )
         native_candidates = build_native_history_candidates(history)
+        log_database_load_event(
+            "INITIAL_LOAD",
+            f"path={path} rows={len(native_candidates)} use_custom_history=False",
+        )
         return cls(
             path,
             use_custom_history,
@@ -1315,7 +1344,7 @@ class DaemonHistoryState:
     def __len__(self) -> int:
         return len(self.native_candidates)
 
-    def _rebuild_native(self) -> None:
+    def _rebuild_native(self, reason: str = "unknown") -> None:
         if self.use_custom_history:
             native_candidates, watermark, status_revision = build_native_custom_history_candidates(
                 self.path,
@@ -1324,6 +1353,10 @@ class DaemonHistoryState:
             self.native_candidates = native_candidates
             self.custom_history_watermark = watermark
             self.custom_history_status_revision = status_revision
+            log_database_load_event(
+                "FULL_REBUILD",
+                f"path={self.path} rows={len(native_candidates)} reason={reason}",
+            )
             return
 
         history = load_history_source(
@@ -1333,16 +1366,20 @@ class DaemonHistoryState:
         self.native_candidates = build_native_history_candidates(history)
         self.custom_history_watermark = None
         self.custom_history_status_revision = 0
+        log_database_load_event(
+            "FULL_REBUILD",
+            f"path={self.path} rows={len(self.native_candidates)} reason={reason}",
+        )
 
     def refresh(self) -> None:
         self.native_candidates.clear_daemon_query_cache()
         if not self.use_custom_history:
-            self._rebuild_native()
+            self._rebuild_native("non_custom_history")
             return
 
         watermark = self.custom_history_watermark
         if watermark is None:
-            self._rebuild_native()
+            self._rebuild_native("no_watermark")
             return
 
         try:
@@ -1371,8 +1408,8 @@ class DaemonHistoryState:
                 revision_row = conn.execute(
                     "SELECT status_revision FROM custom_history_metadata WHERE id = 1"
                 ).fetchone()
-        except (OSError, sqlite3.Error):
-            self._rebuild_native()
+        except (OSError, sqlite3.Error) as exc:
+            self._rebuild_native(f"sqlite_error:{exc}")
             return
 
         records = custom_history_records_from_rows(rows)
@@ -1402,7 +1439,7 @@ class DaemonHistoryState:
                 watermark.entry.timestamp,
             )
         ):
-            self._rebuild_native()
+            self._rebuild_native("anchor_missing_or_watermark_modified")
             return
 
         changed_entries = [
