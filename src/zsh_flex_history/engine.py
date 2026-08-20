@@ -102,7 +102,6 @@ class HistoryEntry:
 @dataclass(frozen=True)
 class DirectoryListingEntry:
     name: str
-    path: Path
     is_dir: bool
 
 
@@ -133,7 +132,7 @@ def cached_directory_listing(directory: Path) -> Optional[tuple[DirectoryListing
                     is_dir = entry.is_dir()
                 except OSError:
                     continue
-                entries.append(DirectoryListingEntry(entry.name, Path(entry.path), is_dir))
+                entries.append(DirectoryListingEntry(entry.name, is_dir))
     except OSError:
         return None
 
@@ -940,7 +939,7 @@ def expand_path_completion_environment(token: str) -> Optional[tuple[str, str, s
 def runtime_completion_matches(
     query: str,
     cursor_pos: int,
-    startup_entries: tuple[DirectoryListingEntry, ...],
+    startup_entries: Optional[tuple[DirectoryListingEntry, ...]] = None,
     *,
     cwd: Path,
     limit: int,
@@ -1028,9 +1027,12 @@ def runtime_completion_matches(
     else:
         if len(token_prefix) <= 2:
             return []
+        entries = startup_entries if startup_entries is not None else cached_directory_listing(cwd)
+        if entries is None:
+            return []
         token_prefix_lower = token_prefix.lower()
         matches: list[DirectoryListingEntry] = []
-        for entry in startup_entries:
+        for entry in entries:
             if entry.name.startswith(".") and not token_prefix.startswith("."):
                 continue
             if entry.name.lower().startswith(token_prefix_lower):

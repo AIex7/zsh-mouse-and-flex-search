@@ -771,7 +771,6 @@ def run(
     tty_out_file = None
     current_cwd_text = normalize_cwd_value(os.getcwd())
     current_cwd_path = Path(current_cwd_text)
-    startup_entries = cached_directory_listing(current_cwd_path) or ()
     fd: Optional[int] = None
     for tty_path in ("/dev/tty", os.ctermid()):
         try:
@@ -924,6 +923,7 @@ def run(
             preferred_runtime_row: Optional[int] = None
             runtime_completion_cache: dict[tuple[str, int], list[MatchResult]] = {}
             render_line_cache: dict[tuple[object, ...], str] = {}
+            prewarm_directory_started = False
 
             def run_search_request(
                 query_text: str,
@@ -1331,7 +1331,6 @@ def run(
                         runtime_completions = runtime_completion_matches(
                             query,
                             cursor_pos,
-                            startup_entries,
                             cwd=current_cwd_path,
                             limit=MAX_RETURNED_RESULTS,
                         )
@@ -1392,6 +1391,14 @@ def run(
                     # while waiting for the next keypress.
                     term_write(move_to(start_row, start_col))
                     term_flush()
+
+                    if not prewarm_directory_started:
+                        prewarm_directory_started = True
+                        threading.Thread(
+                            target=cached_directory_listing,
+                            args=(current_cwd_path,),
+                            daemon=True,
+                        ).start()
 
                     if pending_event is None:
                         input_timeout: Optional[float] = 0.03
