@@ -31,7 +31,7 @@ from .syntax_highlighting import IncrementalHighlighter, ansi_for_token, highlig
 
 from . import engine
 from .engine import *
-from .engine import _cursor_color, _cursor_color_rgb
+from .engine import _cursor_color, _cursor_color_rgb, _cursor_color_configured
 
 
 _TERMINAL_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
@@ -808,7 +808,7 @@ def run(
         with RawTerminal(fd) as rt:
             # Respect an explicit color override. Otherwise mirror the
             # terminal's real cursor color when it answers OSC 12.
-            if _cursor_color is None and _cursor_color_rgb is None:
+            if _cursor_color is None and _cursor_color_rgb is None and not _cursor_color_configured:
                 cursor_color = query_cursor_color(fd)
                 if cursor_color is not None:
                     VISUAL_CURSOR_BG = style(fg_rgb=DORIC["fg_main"], bg_rgb=cursor_color)

@@ -179,6 +179,8 @@ def ansi_color_from_env(name: str, default: Optional[int]) -> Optional[int]:
 
 def color_value_from_env(name: str) -> tuple[Optional[int], Optional[str]]:
     raw = os.environ.get(name, "").strip().lower()
+    if raw in ("none", "disabled", "unsupported", "off", "0"):
+        return None, None
     if raw.startswith("#") and re.fullmatch(r"#[0-9a-f]{6}", raw):
         return None, raw
     return ansi_color_from_env(name, None), None
@@ -230,6 +232,8 @@ def style(
 
 RESET = "\x1b[0m"
 QUERY_SELECTION_BG = style(fg_rgb=DORIC["fg_blue"], bg_rgb=DORIC["bg_blue"])
+_cursor_color_env_raw = os.environ.get("ZSH_FLEX_HISTORY_CURSOR_COLOR")
+_cursor_color_configured = _cursor_color_env_raw is not None and bool(_cursor_color_env_raw.strip())
 _cursor_color, _cursor_color_rgb = color_value_from_env("ZSH_FLEX_HISTORY_CURSOR_COLOR")
 VISUAL_CURSOR_BG = (
     style(fg_rgb=DORIC["fg_main"], bg=_cursor_color)
@@ -380,6 +384,14 @@ def _scale_hex_component(component: str) -> int:
 
 def query_cursor_color(fd: int) -> Optional[str]:
     """Return the terminal's cursor color from OSC 12, when supported."""
+    env_cached = os.environ.get("ZSH_FLEX_HISTORY_CURSOR_COLOR")
+    if env_cached is not None:
+        val = env_cached.strip().lower()
+        if val in ("", "none", "disabled", "unsupported", "off", "0"):
+            return None
+        if val.startswith("#") and re.fullmatch(r"#[0-9a-f]{6}", val):
+            return val
+
     while True:
         ready, _, _ = select.select([fd], [], [], 0)
         if not ready:
@@ -392,14 +404,15 @@ def query_cursor_color(fd: int) -> Optional[str]:
     term_write("\x1b]12;?\x07")
     term_flush()
     buf = bytearray()
-    deadline = time.monotonic() + 0.15
+    deadline = time.monotonic() + 0.010
     while time.monotonic() < deadline:
-        ready, _, _ = select.select([fd], [], [], 0.02)
+        ready, _, _ = select.select([fd], [], [], 0.002)
         if not ready:
             continue
         try:
             chunk = os.read(fd, 128)
         except OSError:
+            os.environ["ZSH_FLEX_HISTORY_CURSOR_COLOR"] = "none"
             return None
         if not chunk:
             continue
@@ -409,14 +422,18 @@ def query_cursor_color(fd: int) -> Optional[str]:
 
     match = re.search(rb"\x1b\]12;rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)(?:\x07|\x1b\\)", bytes(buf))
     if match is None:
+        os.environ["ZSH_FLEX_HISTORY_CURSOR_COLOR"] = "none"
         return None
     try:
         r = _scale_hex_component(match.group(1).decode("ascii"))
         g = _scale_hex_component(match.group(2).decode("ascii"))
         b = _scale_hex_component(match.group(3).decode("ascii"))
     except (UnicodeDecodeError, ValueError):
+        os.environ["ZSH_FLEX_HISTORY_CURSOR_COLOR"] = "none"
         return None
-    return rgb_to_hex(r, g, b)
+    hex_color = rgb_to_hex(r, g, b)
+    os.environ["ZSH_FLEX_HISTORY_CURSOR_COLOR"] = hex_color
+    return hex_color
 
 
 def normalize_cwd_value(cwd: str) -> str:
