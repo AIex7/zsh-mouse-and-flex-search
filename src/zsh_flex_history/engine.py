@@ -651,7 +651,8 @@ def append_custom_history_entry(path: Path, command: str, cwd: str, timestamp: s
     if not normalized_command:
         return False
     try:
-        ensure_custom_history_file(path)
+        if not path.exists():
+            ensure_custom_history_file(path)
         with sqlite3.connect(path) as conn:
             conn.execute(
                 "DELETE FROM custom_history WHERE command = ? AND cwd = ?",
@@ -691,7 +692,8 @@ def update_custom_history_exit_status(
         return False
 
     try:
-        ensure_custom_history_file(path)
+        if not path.exists():
+            return False
         with sqlite3.connect(path) as conn:
             # Select and update the same command row while excluding concurrent writers.
             conn.execute("BEGIN IMMEDIATE")
@@ -1947,7 +1949,7 @@ def run_history_daemon(
     history_length: Optional[int] = None,
     use_custom_history: bool = False,
 ) -> int:
-    if use_custom_history:
+    if use_custom_history and not history_path.exists():
         try:
             ensure_custom_history_file(history_path)
         except OSError as exc:

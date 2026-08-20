@@ -1778,11 +1778,12 @@ def main() -> int:
 
     if args.use_custom_history:
         history_path = default_custom_history_path()
-        try:
-            ensure_custom_history_file(history_path)
-        except OSError as exc:
-            print(f"zsh_flex_history: failed to initialize custom history file: {exc}", file=sys.stderr)
-            return 1
+        if not history_path.exists():
+            try:
+                ensure_custom_history_file(history_path)
+            except OSError as exc:
+                print(f"zsh_flex_history: failed to initialize custom history file: {exc}", file=sys.stderr)
+                return 1
     else:
         history_path_value = args.history_file or os.environ.get("HISTFILE", str(Path.home() / ".zsh_history"))
         history_path = Path(history_path_value).expanduser()
