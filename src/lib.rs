@@ -346,12 +346,11 @@ struct NativeCandidate {
     normalized_start: u32,
     normalized_end: u32,
     cwd: Option<Arc<str>>,
-    words: Vec<String>,
+    words: Box<[Box<str>]>,
     failed: bool,
     ascii: bool,
-    boundary_characters: Vec<bool>,
-    character_count: usize,
-    char_mask: u128,
+    boundary_characters: Option<Box<[bool]>>,
+    character_count: u32,
 }
 
 impl NativeCandidate {
@@ -361,7 +360,7 @@ impl NativeCandidate {
         cwd: Option<Arc<str>>,
         words: Vec<String>,
         failed: bool,
-    ) -> Self {
+    ) -> (Self, u128) {
         let text_lower = if text_lower == text {
             None
         } else {
@@ -375,35 +374,38 @@ impl NativeCandidate {
             .unwrap_or(u32::MAX);
         let ascii = text.is_ascii() && lower.is_ascii();
         let boundary_characters = if ascii {
-            Vec::new()
+            None
         } else {
-            text.chars()
+            let boundaries: Vec<bool> = text
+                .chars()
                 .map(|character| WORD_BOUNDARIES.contains(character))
-                .collect()
+                .collect();
+            Some(boundaries.into_boxed_slice())
         };
         let character_count = if ascii {
-            text.len()
+            text.len() as u32
         } else {
-            text.chars().count()
+            text.chars().count() as u32
         };
         let char_mask = if ascii {
             compute_char_mask_ascii(lower.as_bytes())
         } else {
             compute_char_mask_str(lower)
         };
-        Self {
+        let boxed_words: Box<[Box<str>]> = words.into_iter().map(String::into_boxed_str).collect();
+        let candidate = Self {
             text,
             text_lower,
             normalized_start,
             normalized_end,
             cwd,
-            words,
+            words: boxed_words,
             failed,
             ascii,
             boundary_characters,
             character_count,
-            char_mask,
-        }
+        };
+        (candidate, char_mask)
     }
 
     fn text_lower(&self) -> &str {
@@ -438,7 +440,8 @@ impl NativeCandidate {
                 12
             } else if self
                 .boundary_characters
-                .get(position - 1)
+                .as_deref()
+                .and_then(|b| b.get(position - 1))
                 .copied()
                 .unwrap_or(false)
             {
@@ -470,7 +473,8 @@ impl NativeCandidate {
                     boundary_bonus += 12;
                 } else if self
                     .boundary_characters
-                    .get(position - 1)
+                    .as_deref()
+                    .and_then(|b| b.get(position - 1))
                     .copied()
                     .unwrap_or(false)
                 {
@@ -484,7 +488,8 @@ impl NativeCandidate {
                 }
                 if self
                     .boundary_characters
-                    .get(position - 1)
+                    .as_deref()
+                    .and_then(|b| b.get(position - 1))
                     .copied()
                     .unwrap_or(false)
                 {
@@ -601,7 +606,7 @@ struct HistoryResultPayload<'a> {
     recency: i64,
     cwd: Option<&'a str>,
     failed: bool,
-    words: &'a [String],
+    words: &'a [Box<str>],
 }
 
 #[derive(Serialize)]
@@ -960,7 +965,7 @@ fn intern_cwd(cwd_interner: &mut HashSet<Arc<str>>, cwd: Option<String>) -> Opti
 fn candidate_from_input(
     input: CandidateInput,
     cwd_interner: &mut HashSet<Arc<str>>,
-) -> NativeCandidate {
+) -> (NativeCandidate, u128) {
     let (text, text_lower, cwd, words, failed) = input;
     NativeCandidate::new(
         text,
@@ -1082,8 +1087,8 @@ impl NativeHistory {
         let mut candidates = VecDeque::with_capacity(candidates_input.len());
         let mut char_masks = VecDeque::with_capacity(candidates_input.len());
         for input in candidates_input {
-            let candidate = candidate_from_input(input, &mut cwd_interner);
-            char_masks.push_back(candidate.char_mask);
+            let (candidate, mask) = candidate_from_input(input, &mut cwd_interner);
+            char_masks.push_back(mask);
             candidates.push_back(candidate);
         }
         Self {
@@ -1152,8 +1157,8 @@ impl NativeHistory {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         for input in candidates {
-            let candidate = candidate_from_input(input, &mut self.cwd_interner);
-            self.char_masks.push_back(candidate.char_mask);
+            let (candidate, mask) = candidate_from_input(input, &mut self.cwd_interner);
+            self.char_masks.push_back(mask);
             self.candidates.push_back(candidate);
         }
     }
@@ -1211,8 +1216,8 @@ impl NativeHistory {
             }
         }
         for input in candidates.into_iter().rev() {
-            let candidate = candidate_from_input(input, &mut self.cwd_interner);
-            self.char_masks.push_front(candidate.char_mask);
+            let (candidate, mask) = candidate_from_input(input, &mut self.cwd_interner);
+            self.char_masks.push_front(mask);
             self.candidates.push_front(candidate);
         }
         self.prune_cwd_interner();
@@ -1297,30 +1302,6 @@ impl NativeHistory {
             let mut matched_indices = Some(Vec::new());
             let mut matched_count = 0;
 
-            // Phase 1: Fast SIMD Bitmask Index Pre-Filtering
-            let matching_indices = if let Some(indices) = candidate_indices {
-                let mut filtered = Vec::with_capacity(indices.len());
-                for &index in &indices {
-                    let Some(&mask) = self.char_masks.get(index) else {
-                        continue;
-                    };
-                    if (mask & query_mask) == query_mask {
-                        filtered.push(index);
-                    }
-                }
-                filtered
-            } else {
-                let mut collected = Vec::with_capacity(16_384);
-                let (slice1, slice2) = self.char_masks.as_slices();
-                scan_char_masks(slice1, 0, query_mask, |index| {
-                    collected.push(index);
-                });
-                scan_char_masks(slice2, slice1.len(), query_mask, |index| {
-                    collected.push(index);
-                });
-                collected
-            };
-
             let mut check_candidate = |scan_order: usize, index: usize| {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
@@ -1352,7 +1333,7 @@ impl NativeHistory {
                 } else {
                     prefix_query_words
                         .iter()
-                        .zip(&candidate.words)
+                        .zip(candidate.words.iter())
                         .take_while(|(query_word, candidate_word)| {
                             candidate_word.starts_with(query_word.as_str())
                         })
@@ -1387,9 +1368,24 @@ impl NativeHistory {
                 });
             };
 
-            // Phase 2: Candidate Scoring
-            for (scan_order, &index) in matching_indices.iter().enumerate() {
-                check_candidate(scan_order, index);
+            if let Some(indices) = candidate_indices.as_deref() {
+                for (scan_order, &index) in indices.iter().enumerate() {
+                    let Some(&mask) = self.char_masks.get(index) else {
+                        continue;
+                    };
+                    if (mask & query_mask) != query_mask {
+                        continue;
+                    }
+                    check_candidate(scan_order, index);
+                }
+            } else {
+                let (slice1, slice2) = self.char_masks.as_slices();
+                scan_char_masks(slice1, 0, query_mask, |index| {
+                    check_candidate(index, index);
+                });
+                scan_char_masks(slice2, slice1.len(), query_mask, |index| {
+                    check_candidate(index, index);
+                });
             }
 
             let result_limit = limit.unwrap_or(usize::MAX);
