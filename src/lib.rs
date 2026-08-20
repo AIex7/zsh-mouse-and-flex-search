@@ -1356,9 +1356,7 @@ impl NativeHistory {
         let query = compact_query(query_lower);
         let query_ascii = ascii_query(&query);
         let query_mask = compute_query_char_mask(&query);
-        let query_words_bigram_mask = if ordered_query_words.len() > 1
-            || (!ordered_query_words.is_empty() && ordered_query_words[0].len() >= 2)
-        {
+        let query_words_bigram_mask = if ordered_query_words.len() > 1 {
             compute_words_bigram_mask(&ordered_query_words)
         } else {
             0
@@ -1370,12 +1368,30 @@ impl NativeHistory {
                 0
             };
 
+        let result_limit = limit.unwrap_or(usize::MAX);
+        let single_char_query = query.len() == 1;
+
         py.allow_threads(|| {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
             let mut matched_indices = Some(Vec::new());
             let mut matched_count = 0;
+            let mut preferred_collected = 0;
+            let mut scoring_completed = false;
+            let mut seen_preferred = HashSet::new();
 
             let mut check_candidate = |scan_order: usize, index: usize| {
+                if scoring_completed {
+                    matched_count += 1;
+                    if let Some(indices) = matched_indices.as_mut() {
+                        if indices.len() < max_returned_indices {
+                            indices.push(index);
+                        } else {
+                            matched_indices = None;
+                        }
+                    }
+                    return;
+                }
+
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
@@ -1457,6 +1473,24 @@ impl NativeHistory {
                     score,
                     scan_order,
                 });
+
+                if single_char_query && prefix_word_count == 1 {
+                    if current_cwd.is_none() {
+                        if seen_preferred.insert(candidate.text.as_str()) {
+                            preferred_collected += 1;
+                            if preferred_collected >= result_limit {
+                                scoring_completed = true;
+                            }
+                        }
+                    } else if inner_bucket == 0 {
+                        if seen_preferred.insert(candidate.text.as_str()) {
+                            preferred_collected += 1;
+                            if preferred_collected >= result_limit {
+                                scoring_completed = true;
+                            }
+                        }
+                    }
+                }
             };
 
             if let Some(indices) = candidate_indices.as_deref() {
