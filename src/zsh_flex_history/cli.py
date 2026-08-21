@@ -231,6 +231,21 @@ def terminal_safe_result_text(text: str) -> str:
     return _TERMINAL_CONTROL_RE.sub(" ", text)
 
 
+def result_changed_suffix_col(previous: str, current: str, anchor_col: int) -> int:
+    """Return the terminal column where a changed result suffix begins."""
+    if not current:
+        return 1
+
+    common_length = 0
+    common_limit = min(len(previous), len(current))
+    while common_length < common_limit and previous[common_length] == current[common_length]:
+        common_length += 1
+
+    result_padding_width = max(0, max(1, anchor_col) - 2)
+    common_prefix = terminal_safe_result_text(current[:common_length])
+    return 3 + result_padding_width + text_display_width(common_prefix)
+
+
 def render_result_line(
     item: MatchResult,
     selected: bool,
@@ -1074,16 +1089,13 @@ def run(
                     current_result = (
                         current_results[result_index] if result_index < len(current_results) else ""
                     )
-                    common_length = 0
-                    common_limit = min(len(previous_result), len(current_result))
-                    while (
-                        common_length < common_limit
-                        and previous_result[common_length] == current_result[common_length]
-                    ):
-                        common_length += 1
                     if previous_result != current_result:
                         result_row = next_anchor_row + query_rows_used + result_index
-                        clear_result_col = 1 if not current_result else 3 + common_length
+                        clear_result_col = result_changed_suffix_col(
+                            previous_result,
+                            current_result,
+                            next_anchor_col,
+                        )
                         term_write(move_to(result_row, clear_result_col) + CLEAR_TO_END)
                 last_refresh_results = current_results
                 clear_after_results_row = next_anchor_row + query_rows_used + 3
