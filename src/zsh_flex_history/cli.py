@@ -149,8 +149,16 @@ def query_cursor_visual_position(rows: list[QueryVisualRow], cursor_pos: int) ->
         return 0, 0
     for rindex, row in enumerate(rows):
         # A wrapped-row boundary is the first character of the following
-        # row. Only end-of-input belongs to the final row.
-        if cursor_pos < row.end or (cursor_pos == row.end and rindex == len(rows) - 1):
+        # row. An explicit newline, however, leaves the cursor at the end of
+        # the current row before advancing to the next row.
+        at_explicit_newline = (
+            cursor_pos == row.end
+            and rindex + 1 < len(rows)
+            and rows[rindex + 1].start == row.end + 1
+        )
+        if cursor_pos < row.end or cursor_pos == row.end and (
+            rindex == len(rows) - 1 or at_explicit_newline
+        ):
             offset = max(0, min(cursor_pos - row.start, len(row.text)))
             col = text_display_width(row.text[:offset])
             col = max(0, min(col, row.display_width))
