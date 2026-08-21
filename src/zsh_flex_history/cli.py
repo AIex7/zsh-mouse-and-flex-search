@@ -312,7 +312,10 @@ def draw_panel(
     anchor_col = max(1, anchor_col)
     render_width = terminal_safe_render_width(width, anchor_col)
     result_anchor_col = 1
-    result_render_width = terminal_safe_render_width(width, result_anchor_col)
+    result_padding = " " * max(0, anchor_col - 2)
+    result_render_width = terminal_safe_render_width(
+        width, result_anchor_col + len(result_padding)
+    )
 
     def draw_col_for_row(row_offset: int) -> int:
         # ``row_offset`` is relative to the visible query window.  Only the
@@ -449,7 +452,7 @@ def draw_panel(
                 if len(render_line_cache) >= 2048:
                     render_line_cache.clear()
                 render_line_cache[cache_key] = base_line
-        result_lines.append(base_line)
+        result_lines.append(result_padding + base_line)
 
     final_query_row_abs, final_query_col = query_cursor_visual_position(query_rows, len(query))
     final_query_row = final_query_row_abs - query_start
