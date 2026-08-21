@@ -551,7 +551,12 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
                     return "backspace_word", None
                 return "backspace", None
             if codepoint == 27:
-                return "quit", None
+                return "escape", None
+            # Kitty's enhanced keyboard protocol reports Ctrl-C as the
+            # printable C codepoint plus the Ctrl modifier (CSI 99;5u),
+            # rather than as the single ETX byte used by legacy terminals.
+            if codepoint in (67, 99) and ctrl:
+                return "interrupt", None
             if codepoint == 1 and ctrl:
                 return "home", None
             if codepoint == 5 and ctrl:
@@ -1419,7 +1424,7 @@ def run(
                         clear_panel_and_restore_cursor(clear_display=True)
                         return None
                     if ev == "escape":
-                        clear_panel_and_restore_cursor()
+                        clear_panel_and_restore_cursor(clear_display=True)
                         return None
                     if ev == "enter":
                         chosen = query
