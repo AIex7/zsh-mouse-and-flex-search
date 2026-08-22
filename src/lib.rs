@@ -18,7 +18,6 @@ use std::arch::x86_64::*;
 
 mod syntax_highlighting;
 
-const WORD_BOUNDARIES: &str = " _-/.:";
 const MAX_DAEMON_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const FRAME_MAGIC: [u8; 4] = *b"ZFH\x01";
 const FRAME_HEADER_BYTES: usize = 8;
@@ -29,10 +28,6 @@ const FRAME_PONG_RESPONSE: u8 = 0x82;
 const FRAME_ERROR_RESPONSE: u8 = 0xff;
 const MAX_DAEMON_QUERY_CACHE_ENTRIES: usize = 64;
 const MAX_DAEMON_QUERY_CACHE_INDICES: usize = 1_000_000;
-
-fn is_word_boundary_byte(byte: u8) -> bool {
-    matches!(byte, b' ' | b'_' | b'-' | b'/' | b'.' | b':')
-}
 
 fn is_python_whitespace(character: char) -> bool {
     character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}')
@@ -61,7 +56,13 @@ fn compact_query(query_lower: &str) -> Vec<char> {
 fn ascii_query(query: &[char]) -> Option<Vec<u8>> {
     query
         .iter()
-        .map(|character| u8::try_from(*character as u32).ok())
+        .map(|character| {
+            if character.is_ascii() {
+                Some(*character as u8)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -131,81 +132,31 @@ fn find_byte_simd(slice: &[u8], target: u8) -> Option<usize> {
     }
 }
 
-fn match_flex_ascii(query: &[u8], candidate: &[u8], candidate_lower: &[u8]) -> Option<i64> {
+fn match_flex_ascii(query: &[u8], _candidate: &[u8], candidate_lower: &[u8]) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }
-    if query.len() == 1 {
-        let position = find_byte_simd(candidate_lower, query[0])?;
-        let boundary_bonus = if position == 0 {
-            12
-        } else if is_word_boundary_byte(candidate[position - 1]) {
-            8
-        } else {
-            0
-        };
-        return Some(
-            boundary_bonus + (30_i64 - position as i64).max(0) + 20 - (candidate.len() / 8) as i64,
-        );
-    }
-
-    let mut first = 0;
-    let mut previous = 0;
-    let mut contiguous = 0_i64;
-    let mut gap_penalty = 0_i64;
-    let mut boundary_bonus = 0_i64;
     let mut search_from = 0;
-
-    for (query_index, &target) in query.iter().enumerate() {
+    for &target in query {
         if search_from >= candidate_lower.len() {
             return None;
         }
-
-        let position = if candidate_lower[search_from] == target {
-            search_from
+        if candidate_lower[search_from] == target {
+            search_from += 1;
         } else {
-            search_from + find_byte_simd(&candidate_lower[search_from..], target)?
-        };
-
-        if query_index == 0 {
-            first = position;
-            if position == 0 {
-                boundary_bonus += 12;
-            } else if is_word_boundary_byte(candidate[position - 1]) {
-                boundary_bonus += 8;
-            }
-        } else {
-            let gap = position - previous - 1;
-            gap_penalty += (gap * 2) as i64;
-            if gap == 0 {
-                contiguous += 10;
-            }
-            if is_word_boundary_byte(candidate[position - 1]) {
-                boundary_bonus += 6;
-            }
+            search_from += find_byte_simd(&candidate_lower[search_from..], target)? + 1;
         }
-
-        previous = position;
-        search_from = position + 1;
     }
-
-    let span = previous - first + 1;
-    let start_bonus = (30_i64 - first as i64).max(0);
-    let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
-    Some(
-        contiguous + boundary_bonus + start_bonus + compact_bonus
-            - gap_penalty
-            - (candidate.len() / 8) as i64,
-    )
+    Some(0)
 }
 
-/// Return the existing Python flex match score without retaining match positions.
-fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<i64> {
-    if candidate.is_ascii() && candidate_lower.is_ascii() {
+/// Return whether query is a valid subsequence of candidate.
+fn match_flex(query: &[char], _candidate: &str, candidate_lower: &str) -> Option<i64> {
+    if candidate_lower.is_ascii() {
         if let Some(query_ascii) = ascii_query(query) {
             return match_flex_ascii(
                 &query_ascii,
-                candidate.as_bytes(),
+                candidate_lower.as_bytes(),
                 candidate_lower.as_bytes(),
             );
         }
@@ -214,59 +165,13 @@ fn match_flex(query: &[char], candidate: &str, candidate_lower: &str) -> Option<
         return Some(0);
     }
 
-    let boundary_characters: Vec<bool> = candidate
-        .chars()
-        .map(|character| WORD_BOUNDARIES.contains(character))
-        .collect();
-    let character_count = boundary_characters.len();
     let mut query_index = 0;
-    let mut first = 0;
-    let mut previous = 0;
-    let mut contiguous = 0_i64;
-    let mut gap_penalty = 0_i64;
-    let mut boundary_bonus = 0_i64;
-
-    for (position, candidate_character) in candidate_lower.chars().enumerate() {
-        if candidate_character != query[query_index] {
-            continue;
-        }
-        if query_index == 0 {
-            first = position;
-            if position == 0 {
-                boundary_bonus += 12;
-            } else if boundary_characters
-                .get(position - 1)
-                .copied()
-                .unwrap_or(false)
-            {
-                boundary_bonus += 8;
+    for candidate_character in candidate_lower.chars() {
+        if candidate_character == query[query_index] {
+            query_index += 1;
+            if query_index == query.len() {
+                return Some(0);
             }
-        } else {
-            let gap = position - previous - 1;
-            gap_penalty += (gap * 2) as i64;
-            if gap == 0 {
-                contiguous += 10;
-            }
-            if boundary_characters
-                .get(position - 1)
-                .copied()
-                .unwrap_or(false)
-            {
-                boundary_bonus += 6;
-            }
-        }
-
-        previous = position;
-        query_index += 1;
-        if query_index == query.len() {
-            let span = previous - first + 1;
-            let start_bonus = (30_i64 - first as i64).max(0);
-            let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
-            return Some(
-                contiguous + boundary_bonus + start_bonus + compact_bonus
-                    - gap_penalty
-                    - (character_count / 8) as i64,
-            );
         }
     }
     None
@@ -623,8 +528,6 @@ struct NativeCandidate {
     words: CompactWords,
     failed: bool,
     ascii: bool,
-    boundary_characters: Option<Box<[bool]>>,
-    character_count: u32,
 }
 
 impl NativeCandidate {
@@ -647,20 +550,6 @@ impl NativeCandidate {
         let normalized_end = u32::try_from(normalized_start as usize + normalized.len())
             .unwrap_or(u32::MAX);
         let ascii = text.is_ascii() && lower.is_ascii();
-        let boundary_characters = if ascii {
-            None
-        } else {
-            let boundaries: Vec<bool> = text
-                .chars()
-                .map(|character| WORD_BOUNDARIES.contains(character))
-                .collect();
-            Some(boundaries.into_boxed_slice())
-        };
-        let character_count = if ascii {
-            text.len() as u32
-        } else {
-            text.chars().count() as u32
-        };
         let char_mask = if ascii {
             compute_char_mask_ascii(lower.as_bytes())
         } else {
@@ -681,8 +570,6 @@ impl NativeCandidate {
             words,
             failed,
             ascii,
-            boundary_characters,
-            character_count,
         };
         (candidate, char_mask, bigram_mask)
     }
@@ -729,83 +616,13 @@ impl NativeCandidate {
         if query.is_empty() {
             return Some(0);
         }
-        if query.len() == 1 {
-            let position = self
-                .text_lower()
-                .chars()
-                .position(|character| character == query[0])?;
-            let boundary_bonus = if position == 0 {
-                12
-            } else if self
-                .boundary_characters
-                .as_deref()
-                .and_then(|b| b.get(position - 1))
-                .copied()
-                .unwrap_or(false)
-            {
-                8
-            } else {
-                0
-            };
-            return Some(
-                boundary_bonus + (30_i64 - position as i64).max(0) + 20
-                    - (self.character_count / 8) as i64,
-            );
-        }
-
         let mut query_index = 0;
-        let mut first = 0;
-        let mut previous = 0;
-        let mut contiguous = 0_i64;
-        let mut gap_penalty = 0_i64;
-        let mut boundary_bonus = 0_i64;
-
-        for (position, candidate_character) in self.text_lower().chars().enumerate() {
-            if candidate_character != query[query_index] {
-                continue;
-            }
-
-            if query_index == 0 {
-                first = position;
-                if position == 0 {
-                    boundary_bonus += 12;
-                } else if self
-                    .boundary_characters
-                    .as_deref()
-                    .and_then(|b| b.get(position - 1))
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    boundary_bonus += 8;
+        for candidate_character in self.text_lower().chars() {
+            if candidate_character == query[query_index] {
+                query_index += 1;
+                if query_index == query.len() {
+                    return Some(0);
                 }
-            } else {
-                let gap = position - previous - 1;
-                gap_penalty += (gap * 2) as i64;
-                if gap == 0 {
-                    contiguous += 10;
-                }
-                if self
-                    .boundary_characters
-                    .as_deref()
-                    .and_then(|b| b.get(position - 1))
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    boundary_bonus += 6;
-                }
-            }
-
-            previous = position;
-            query_index += 1;
-            if query_index == query.len() {
-                let span = previous - first + 1;
-                let start_bonus = (30_i64 - first as i64).max(0);
-                let compact_bonus = (20_i64 - (span - query.len()) as i64).max(0);
-                return Some(
-                    contiguous + boundary_bonus + start_bonus + compact_bonus
-                        - gap_penalty
-                        - (self.character_count / 8) as i64,
-                );
             }
         }
         None
