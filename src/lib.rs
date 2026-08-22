@@ -1743,8 +1743,13 @@ impl NativeHistory {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
-                let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
-                    return;
+                let score = if single_char_query {
+                    0
+                } else {
+                    let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
+                        return;
+                    };
+                    score
                 };
                 if !normalized_query.is_empty() && candidate.normalized_text() == normalized_query {
                     return;
