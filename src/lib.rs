@@ -1,7 +1,8 @@
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Serialize, Serializer};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -452,13 +453,169 @@ fn scan_char_masks(
     }
 }
 
+const WORD_STORAGE_HEADER_BYTES: usize = 5;
+const WORD_STORAGE_PACKED_SOURCE: u8 = 0x80;
+const WORD_STORAGE_U16: u8 = 0;
+const WORD_STORAGE_U32: u8 = 1;
+const WORD_STORAGE_U64: u8 = 2;
+
+/// One allocation containing word spans and, only when required, fallback text.
+/// Normal candidates store each `(u16, u16)` span in four bytes.
+#[repr(transparent)]
+struct CompactWords(Box<[u8]>);
+
+impl CompactWords {
+    fn new(source: &str, words: Vec<String>) -> Self {
+        let (offsets, packed_source) = if let Some(offsets) = find_word_offsets(source, &words) {
+            (offsets, None)
+        } else {
+            let packed_capacity = words.iter().map(String::len).sum();
+            let mut packed = String::with_capacity(packed_capacity);
+            let mut offsets = Vec::with_capacity(words.len());
+            for word in words {
+                let start = packed.len();
+                packed.push_str(&word);
+                offsets.push((start, packed.len()));
+            }
+            (offsets, Some(packed))
+        };
+
+        let width_format = if offsets.iter().all(|&(_, end)| end <= u16::MAX as usize) {
+            WORD_STORAGE_U16
+        } else if offsets.iter().all(|&(_, end)| end <= u32::MAX as usize) {
+            WORD_STORAGE_U32
+        } else {
+            WORD_STORAGE_U64
+        };
+        let span_bytes = match width_format {
+            WORD_STORAGE_U16 => 4,
+            WORD_STORAGE_U32 => 8,
+            _ => 16,
+        };
+        let packed_bytes = packed_source.as_ref().map_or(0, String::len);
+        let mut storage = Vec::with_capacity(
+            WORD_STORAGE_HEADER_BYTES + offsets.len() * span_bytes + packed_bytes,
+        );
+        storage.push(
+            width_format
+                | if packed_source.is_some() {
+                    WORD_STORAGE_PACKED_SOURCE
+                } else {
+                    0
+                },
+        );
+        storage.extend_from_slice(&(offsets.len() as u32).to_ne_bytes());
+        for (start, end) in offsets {
+            match width_format {
+                WORD_STORAGE_U16 => {
+                    storage.extend_from_slice(&(start as u16).to_ne_bytes());
+                    storage.extend_from_slice(&(end as u16).to_ne_bytes());
+                }
+                WORD_STORAGE_U32 => {
+                    storage.extend_from_slice(&(start as u32).to_ne_bytes());
+                    storage.extend_from_slice(&(end as u32).to_ne_bytes());
+                }
+                _ => {
+                    storage.extend_from_slice(&(start as u64).to_ne_bytes());
+                    storage.extend_from_slice(&(end as u64).to_ne_bytes());
+                }
+            }
+        }
+        if let Some(packed_source) = packed_source {
+            storage.extend_from_slice(packed_source.as_bytes());
+        }
+        Self(storage.into_boxed_slice())
+    }
+
+    fn format(&self) -> u8 {
+        self.0.first().copied().unwrap_or(WORD_STORAGE_U16)
+    }
+
+    fn len(&self) -> usize {
+        self.0
+            .get(1..WORD_STORAGE_HEADER_BYTES)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_ne_bytes)
+            .unwrap_or(0) as usize
+    }
+
+    fn span_bytes(&self) -> usize {
+        match self.format() & !WORD_STORAGE_PACKED_SOURCE {
+            WORD_STORAGE_U16 => 4,
+            WORD_STORAGE_U32 => 8,
+            _ => 16,
+        }
+    }
+
+    fn spans_end(&self) -> usize {
+        WORD_STORAGE_HEADER_BYTES + self.len() * self.span_bytes()
+    }
+
+    fn get(&self, index: usize) -> Option<(usize, usize)> {
+        if index >= self.len() {
+            return None;
+        }
+        let start = WORD_STORAGE_HEADER_BYTES + index * self.span_bytes();
+        match self.format() & !WORD_STORAGE_PACKED_SOURCE {
+            WORD_STORAGE_U16 => Some((
+                u16::from_ne_bytes(self.0.get(start..start + 2)?.try_into().ok()?) as usize,
+                u16::from_ne_bytes(self.0.get(start + 2..start + 4)?.try_into().ok()?) as usize,
+            )),
+            WORD_STORAGE_U32 => Some((
+                u32::from_ne_bytes(self.0.get(start..start + 4)?.try_into().ok()?) as usize,
+                u32::from_ne_bytes(self.0.get(start + 4..start + 8)?.try_into().ok()?) as usize,
+            )),
+            _ => Some((
+                u64::from_ne_bytes(self.0.get(start..start + 8)?.try_into().ok()?) as usize,
+                u64::from_ne_bytes(self.0.get(start + 8..start + 16)?.try_into().ok()?) as usize,
+            )),
+        }
+    }
+
+    fn is_compact(&self) -> bool {
+        self.format() & !WORD_STORAGE_PACKED_SOURCE == WORD_STORAGE_U16
+    }
+
+    fn is_wide(&self) -> bool {
+        !self.is_compact()
+    }
+
+    fn is_packed(&self) -> bool {
+        self.format() & WORD_STORAGE_PACKED_SOURCE != 0
+    }
+
+    fn packed_source(&self) -> Option<&str> {
+        if !self.is_packed() {
+            return None;
+        }
+        std::str::from_utf8(self.0.get(self.spans_end()..)?).ok()
+    }
+
+    fn packed_bytes(&self) -> usize {
+        self.packed_source().map_or(0, str::len)
+    }
+}
+
+fn find_word_offsets(source: &str, words: &[String]) -> Option<Vec<(usize, usize)>> {
+    let mut offsets = Vec::with_capacity(words.len());
+    let mut cursor = 0;
+    for word in words {
+        let relative_start = source.get(cursor..)?.find(word)?;
+        let start = cursor + relative_start;
+        let end = start.checked_add(word.len())?;
+        offsets.push((start, end));
+        cursor = end;
+    }
+    Some(offsets)
+}
+
 struct NativeCandidate {
     text: String,
     text_lower: Option<Box<str>>,
     normalized_start: u32,
     normalized_end: u32,
     cwd: Option<Arc<str>>,
-    words: Box<[Box<str>]>,
+    words: CompactWords,
     failed: bool,
     ascii: bool,
     boundary_characters: Option<Box<[bool]>>,
@@ -509,14 +666,14 @@ impl NativeCandidate {
         } else {
             compute_bigram_mask_str(lower)
         };
-        let boxed_words: Box<[Box<str>]> = words.into_iter().map(String::into_boxed_str).collect();
+        let words = CompactWords::new(lower, words);
         let candidate = Self {
             text,
             text_lower,
             normalized_start,
             normalized_end,
             cwd,
-            words: boxed_words,
+            words,
             failed,
             ascii,
             boundary_characters,
@@ -533,6 +690,25 @@ impl NativeCandidate {
         self.text_lower()
             .get(self.normalized_start as usize..self.normalized_end as usize)
             .unwrap_or_else(|| python_trim(self.text_lower()))
+    }
+
+    fn word_source(&self) -> &str {
+        self.words
+            .packed_source()
+            .unwrap_or_else(|| self.text_lower())
+    }
+
+    fn word_count(&self) -> usize {
+        self.words.len()
+    }
+
+    fn word(&self, index: usize) -> Option<&str> {
+        let (start, end) = self.words.get(index)?;
+        self.word_source().get(start..end)
+    }
+
+    fn first_word(&self) -> Option<&str> {
+        self.word(0)
     }
 
     fn match_flex_score(&self, query: &[char], query_ascii: Option<&[u8]>) -> Option<i64> {
@@ -716,6 +892,23 @@ struct RankedMatch {
     scan_order: usize,
 }
 
+struct CandidateWords<'a>(&'a NativeCandidate);
+
+impl Serialize for CandidateWords<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.word_count()))?;
+        for index in 0..self.0.word_count() {
+            if let Some(word) = self.0.word(index) {
+                sequence.serialize_element(word)?;
+            }
+        }
+        sequence.end()
+    }
+}
+
 #[derive(Serialize)]
 struct HistoryResultPayload<'a> {
     text: &'a str,
@@ -724,7 +917,7 @@ struct HistoryResultPayload<'a> {
     recency: i64,
     cwd: Option<&'a str>,
     failed: bool,
-    words: &'a [Box<str>],
+    words: CandidateWords<'a>,
 }
 
 #[derive(Serialize)]
@@ -1117,7 +1310,7 @@ impl NativeHistory {
                     recency: -(*index as i64),
                     cwd: candidate.cwd.as_deref(),
                     failed: candidate.failed,
-                    words: &candidate.words,
+                    words: CandidateWords(candidate),
                 }
             })
             .collect();
@@ -1269,6 +1462,44 @@ impl NativeHistory {
             lowercase_bytes,
             self.cwd_interner.len(),
             cwd_references,
+        )
+    }
+
+    /// Report flattened word storage for regression tests and diagnostics.
+    /// (words, compact-span candidates, wide-span candidates,
+    /// packed fallback candidates, packed fallback bytes)
+    fn candidate_word_storage_stats(&self) -> (usize, usize, usize, usize, usize) {
+        let word_count = self
+            .candidates
+            .iter()
+            .map(NativeCandidate::word_count)
+            .sum();
+        let compact_candidates = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.words.is_compact())
+            .count();
+        let wide_candidates = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.words.is_wide())
+            .count();
+        let packed_candidates = self
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.words.is_packed())
+            .count();
+        let packed_bytes = self
+            .candidates
+            .iter()
+            .map(|candidate| candidate.words.packed_bytes())
+            .sum();
+        (
+            word_count,
+            compact_candidates,
+            wide_candidates,
+            packed_candidates,
+            packed_bytes,
         )
     }
 
@@ -1489,7 +1720,11 @@ impl NativeHistory {
                     } else {
                         true
                     };
-                    if has_prefix_match && candidate.words.first().is_some_and(|w| w.starts_with(prefix)) {
+                    if has_prefix_match
+                        && candidate
+                            .first_word()
+                            .is_some_and(|word| word.starts_with(prefix))
+                    {
                         1
                     } else {
                         0
@@ -1499,9 +1734,11 @@ impl NativeHistory {
                 } else {
                     prefix_query_words
                         .iter()
-                        .zip(candidate.words.iter())
-                        .take_while(|(query_word, candidate_word)| {
-                            candidate_word.starts_with(query_word.as_str())
+                        .enumerate()
+                        .take_while(|(index, query_word)| {
+                            candidate
+                                .word(*index)
+                                .is_some_and(|word| word.starts_with(query_word.as_str()))
                         })
                         .count()
                 };
@@ -1780,4 +2017,52 @@ fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(parse_search_response, module)?)?;
     module.add_function(wrap_pyfunction!(serialize_search_request, module)?)?;
     module.add_function(wrap_pyfunction!(search_daemon, module)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_word_field_does_not_enlarge_native_candidate_layout() {
+        assert_eq!(
+            std::mem::size_of::<CompactWords>(),
+            std::mem::size_of::<Box<[Box<str>]>>()
+        );
+    }
+
+    #[test]
+    fn compact_words_borrow_the_candidate_text() {
+        let source = "git status --short";
+        let words = CompactWords::new(
+            source,
+            vec!["git".to_owned(), "status".to_owned(), "--short".to_owned()],
+        );
+        assert!(words.is_compact());
+        assert!(!words.is_packed());
+        assert_eq!(words.get(1), Some((4, 10)));
+    }
+
+    #[test]
+    fn shell_transformed_words_share_one_packed_fallback() {
+        let words = CompactWords::new(
+            r"printf hello\ world",
+            vec!["printf".to_owned(), "hello world".to_owned()],
+        );
+        assert!(words.is_compact());
+        assert_eq!(words.packed_source(), Some("printfhello world"));
+        assert_eq!(words.get(1), Some((6, 17)));
+    }
+
+    #[test]
+    fn oversized_candidates_use_wide_offsets_without_truncation() {
+        let source = format!("{}word", "x".repeat(u16::MAX as usize + 1));
+        let words = CompactWords::new(&source, vec!["word".to_owned()]);
+        assert!(words.is_wide());
+        assert!(!words.is_packed());
+        assert_eq!(
+            words.get(0),
+            Some((u16::MAX as usize + 1, u16::MAX as usize + 5))
+        );
+    }
 }
