@@ -21,39 +21,19 @@ def python_flex_match(
     *,
     candidate_lower: str | None = None,
 ) -> engine.MatchResult | None:
-    """Independent test reference for the native scoring contract."""
+    """Independent reference for the zero-score subsequence contract."""
     q = "".join(character for character in query.lower() if not character.isspace())
     c = candidate_lower if candidate_lower is not None else candidate.lower()
     if not q:
         return engine.MatchResult(candidate, 0, text_lower=c)
 
     at = 0
-    first = previous = contiguous = gap_penalty = boundary_bonus = 0
-    for index, character in enumerate(q):
+    for character in q:
         position = c.find(character, at)
         if position == -1:
             return None
-        if index == 0:
-            first = position
-            if position == 0:
-                boundary_bonus += 12
-            elif candidate[position - 1] in " _-/.:":
-                boundary_bonus += 8
-        else:
-            gap = position - previous - 1
-            gap_penalty += gap * 2
-            if gap == 0:
-                contiguous += 10
-            if candidate[position - 1] in " _-/.:":
-                boundary_bonus += 6
-        previous = position
         at = position + 1
-
-    span = previous - first + 1
-    score = contiguous + boundary_bonus + max(0, 30 - first)
-    score += max(0, 20 - (span - len(q)))
-    score -= gap_penalty + len(candidate) // 8
-    return engine.MatchResult(candidate, score, text_lower=c)
+    return engine.MatchResult(candidate, 0, text_lower=c)
 
 
 class NativeFlexMatchTests(unittest.TestCase):
