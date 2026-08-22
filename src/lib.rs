@@ -260,11 +260,13 @@ fn scan_char_masks(
     slice: &[u128],
     base_offset: usize,
     query_mask: u128,
-    mut on_match: impl FnMut(usize),
+    mut on_match: impl FnMut(usize) -> bool,
 ) {
     if query_mask == 0 {
         for i in 0..slice.len() {
-            on_match(base_offset + i);
+            if !on_match(base_offset + i) {
+                break;
+            }
         }
         return;
     }
@@ -276,6 +278,7 @@ fn scan_char_masks(
         let chunks = slice.chunks_exact(4);
         let remainder = chunks.remainder();
         let mut base = base_offset;
+        let mut keep_matching = true;
 
         for chunk in chunks {
             let ptr = chunk.as_ptr();
@@ -289,17 +292,32 @@ fn scan_char_masks(
             let c2 = vceqq_u8(vandq_u8(m2, q_vec), q_vec);
             let c3 = vceqq_u8(vandq_u8(m3, q_vec), q_vec);
 
-            if vminvq_u8(c0) == 0xFF {
-                on_match(base);
-            }
-            if vminvq_u8(c1) == 0xFF {
-                on_match(base + 1);
-            }
-            if vminvq_u8(c2) == 0xFF {
-                on_match(base + 2);
-            }
-            if vminvq_u8(c3) == 0xFF {
-                on_match(base + 3);
+            if keep_matching {
+                if vminvq_u8(c0) == 0xFF && !on_match(base) {
+                    keep_matching = false;
+                }
+                if keep_matching && vminvq_u8(c1) == 0xFF && !on_match(base + 1) {
+                    keep_matching = false;
+                }
+                if keep_matching && vminvq_u8(c2) == 0xFF && !on_match(base + 2) {
+                    keep_matching = false;
+                }
+                if keep_matching && vminvq_u8(c3) == 0xFF && !on_match(base + 3) {
+                    keep_matching = false;
+                }
+            } else {
+                if vminvq_u8(c0) == 0xFF {
+                    let _ = on_match(base);
+                }
+                if vminvq_u8(c1) == 0xFF {
+                    let _ = on_match(base + 1);
+                }
+                if vminvq_u8(c2) == 0xFF {
+                    let _ = on_match(base + 2);
+                }
+                if vminvq_u8(c3) == 0xFF {
+                    let _ = on_match(base + 3);
+                }
             }
             base += 4;
         }
@@ -307,8 +325,8 @@ fn scan_char_masks(
         for &mask in remainder {
             let m = vld1q_u8((&mask as *const u128) as *const u8);
             let c = vceqq_u8(vandq_u8(m, q_vec), q_vec);
-            if vminvq_u8(c) == 0xFF {
-                on_match(base);
+            if vminvq_u8(c) == 0xFF && !on_match(base) {
+                // finished
             }
             base += 1;
         }
@@ -321,6 +339,7 @@ fn scan_char_masks(
         let chunks = slice.chunks_exact(4);
         let remainder = chunks.remainder();
         let mut base = base_offset;
+        let mut keep_matching = true;
 
         for chunk in chunks {
             let ptr = chunk.as_ptr() as *const __m128i;
@@ -329,25 +348,40 @@ fn scan_char_masks(
             let m2 = _mm_loadu_si128(ptr.add(2));
             let m3 = _mm_loadu_si128(ptr.add(3));
 
-            if _mm_testc_si128(m0, q_vec) != 0 {
-                on_match(base);
-            }
-            if _mm_testc_si128(m1, q_vec) != 0 {
-                on_match(base + 1);
-            }
-            if _mm_testc_si128(m2, q_vec) != 0 {
-                on_match(base + 2);
-            }
-            if _mm_testc_si128(m3, q_vec) != 0 {
-                on_match(base + 3);
+            if keep_matching {
+                if _mm_testc_si128(m0, q_vec) != 0 && !on_match(base) {
+                    keep_matching = false;
+                }
+                if keep_matching && _mm_testc_si128(m1, q_vec) != 0 && !on_match(base + 1) {
+                    keep_matching = false;
+                }
+                if keep_matching && _mm_testc_si128(m2, q_vec) != 0 && !on_match(base + 2) {
+                    keep_matching = false;
+                }
+                if keep_matching && _mm_testc_si128(m3, q_vec) != 0 && !on_match(base + 3) {
+                    keep_matching = false;
+                }
+            } else {
+                if _mm_testc_si128(m0, q_vec) != 0 {
+                    let _ = on_match(base);
+                }
+                if _mm_testc_si128(m1, q_vec) != 0 {
+                    let _ = on_match(base + 1);
+                }
+                if _mm_testc_si128(m2, q_vec) != 0 {
+                    let _ = on_match(base + 2);
+                }
+                if _mm_testc_si128(m3, q_vec) != 0 {
+                    let _ = on_match(base + 3);
+                }
             }
             base += 4;
         }
 
         for &mask in remainder {
             let m = _mm_loadu_si128((&mask as *const u128) as *const __m128i);
-            if _mm_testc_si128(m, q_vec) != 0 {
-                on_match(base);
+            if _mm_testc_si128(m, q_vec) != 0 && !on_match(base) {
+                // finished
             }
             base += 1;
         }
@@ -356,8 +390,8 @@ fn scan_char_masks(
     #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "sse4.1"))))]
     {
         for (i, &mask) in slice.iter().enumerate() {
-            if (mask & query_mask) == query_mask {
-                on_match(base_offset + i);
+            if (mask & query_mask) == query_mask && !on_match(base_offset + i) {
+                // finished
             }
         }
     }
@@ -1476,7 +1510,7 @@ impl NativeHistory {
                 }
             } else {
                 let (slice1, slice2) = self.char_masks.as_slices();
-                let mut check = |index: usize| {
+                let mut check = |index: usize| -> bool {
                     if let Some(candidate) = self.candidates.get(index) {
                         if let Some(score) =
                             candidate.match_flex_score(&query, query_ascii.as_deref())
@@ -1484,6 +1518,7 @@ impl NativeHistory {
                             matches.push((index, score));
                         }
                     }
+                    true
                 };
                 scan_char_masks(slice1, 0, query_mask, &mut check);
                 scan_char_masks(slice2, slice1.len(), query_mask, &mut check);
@@ -1535,6 +1570,14 @@ impl NativeHistory {
 
         let result_limit = limit.unwrap_or(usize::MAX);
         let single_char_query = query.len() == 1;
+        let single_ascii_prefix_byte = if prefix_query_words.len() == 1
+            && prefix_query_words[0].len() == 1
+            && prefix_query_words[0].is_ascii()
+        {
+            Some(prefix_query_words[0].as_bytes()[0])
+        } else {
+            None
+        };
 
         py.allow_threads(|| {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
@@ -1544,33 +1587,34 @@ impl NativeHistory {
             let mut scoring_completed = false;
             let mut seen_preferred = HashSet::new();
 
-            let mut check_candidate = |scan_order: usize, index: usize| {
+            let mut check_candidate = |scan_order: usize, index: usize| -> bool {
                 if scoring_completed {
                     matched_count += 1;
                     if let Some(indices) = matched_indices.as_mut() {
                         if indices.len() < max_returned_indices {
                             indices.push(index);
+                            return true;
                         } else {
                             matched_indices = None;
                         }
                     }
-                    return;
+                    return false;
                 }
 
                 let Some(candidate) = self.candidates.get(index) else {
-                    return;
+                    return true;
                 };
                 let is_single_ascii = single_char_query && query_ascii.is_some();
                 let score = if is_single_ascii {
                     0
                 } else {
                     let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
-                        return;
+                        return true;
                     };
                     score
                 };
                 if !normalized_query.is_empty() && candidate.normalized_text() == normalized_query {
-                    return;
+                    return true;
                 }
 
                 matched_count += 1;
@@ -1582,7 +1626,19 @@ impl NativeHistory {
                     }
                 }
 
-                let prefix_word_count = if prefix_query_words.len() == 1 {
+                let prefix_word_count = if let Some(prefix_byte) = single_ascii_prefix_byte {
+                    let lower_bytes = candidate.text_lower().as_bytes();
+                    if lower_bytes.first().copied() == Some(prefix_byte) {
+                        1
+                    } else if candidate
+                        .first_word()
+                        .is_some_and(|word| word.starts_with(prefix_query_words[0].as_str()))
+                    {
+                        1
+                    } else {
+                        0
+                    }
+                } else if prefix_query_words.len() == 1 {
                     let prefix = prefix_query_words[0].as_str();
                     let has_prefix_match = if prefix_bigram_mask != 0 {
                         self.bigram_masks
@@ -1645,11 +1701,13 @@ impl NativeHistory {
                         std::array::from_fn(|_| Vec::new())
                     });
                 }
-                buckets_by_prefix[prefix_word_count][inner_bucket].push(RankedMatch {
-                    index,
-                    score,
-                    scan_order,
-                });
+                if buckets_by_prefix[prefix_word_count][inner_bucket].len() < result_limit * 2 {
+                    buckets_by_prefix[prefix_word_count][inner_bucket].push(RankedMatch {
+                        index,
+                        score,
+                        scan_order,
+                    });
+                }
 
                 if single_char_query && prefix_word_count == 1 {
                     if current_cwd.is_none() {
@@ -1668,6 +1726,7 @@ impl NativeHistory {
                         }
                     }
                 }
+                true
             };
 
             if let Some(indices) = candidate_indices.as_deref() {
@@ -1678,15 +1737,17 @@ impl NativeHistory {
                     if (mask & query_mask) != query_mask {
                         continue;
                     }
-                    check_candidate(scan_order, index);
+                    if !check_candidate(scan_order, index) {
+                        break;
+                    }
                 }
             } else {
                 let (slice1, slice2) = self.char_masks.as_slices();
                 scan_char_masks(slice1, 0, query_mask, |index| {
-                    check_candidate(index, index);
+                    check_candidate(index, index)
                 });
                 scan_char_masks(slice2, slice1.len(), query_mask, |index| {
-                    check_candidate(index, index);
+                    check_candidate(index, index)
                 });
             }
 
