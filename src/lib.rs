@@ -1743,7 +1743,8 @@ impl NativeHistory {
                 let Some(candidate) = self.candidates.get(index) else {
                     return;
                 };
-                let score = if single_char_query {
+                let is_single_ascii = single_char_query && query_ascii.is_some();
+                let score = if is_single_ascii {
                     0
                 } else {
                     let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
