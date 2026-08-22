@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import os
-import json
 import re
 import select
 import shlex
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -24,6 +22,7 @@ from typing import Any, Optional, Sequence
 from ._flex_match import NativeDaemonServer as _NativeDaemonServer
 from ._flex_match import NativeHistory as _NativeHistory
 from ._flex_match import flex_match as _native_flex_match
+from ._flex_match import ping_daemon as _native_ping_daemon
 from ._flex_match import search_daemon as _native_search_daemon
 
 ANSI_COLOR_NAMES = {
@@ -1245,17 +1244,17 @@ def build_native_custom_history_candidates(
     return native_candidates, watermark, status_revision
 
 
-def native_history_response_json(
+def native_history_response_frame(
     query: str,
     native_candidates: Any,
     *,
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     current_cwd: Optional[str] = None,
-) -> str:
-    """Serialize a complete search response without a Python history list."""
+) -> bytes:
+    """Encode a complete search response as a binary daemon frame."""
     result_limit = limit if (limit is None or limit > 0) else None
-    return native_candidates.search_response_json(
+    return native_candidates.search_response_frame(
         query.lower(),
         query.strip().lower(),
         shell_words_for_matching(query),
@@ -1267,17 +1266,17 @@ def native_history_response_json(
     )
 
 
-def native_history_response_json_for_daemon(
+def native_history_response_frame_for_daemon(
     query: str,
     native_candidates: Any,
     *,
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     current_cwd: Optional[str] = None,
-) -> str:
-    """Serialize results and retain complete matches inside the daemon."""
+) -> bytes:
+    """Encode results as a binary frame and retain complete matches in-process."""
     result_limit = limit if (limit is None or limit > 0) else None
-    return native_candidates.search_response_json_for_daemon(
+    return native_candidates.search_response_frame_for_daemon(
         query.lower(),
         query.strip().lower(),
         shell_words_for_matching(query),
@@ -1468,9 +1467,9 @@ class DaemonHistoryState:
         candidate_indices: Optional[Sequence[int]],
         limit: Optional[int],
         current_cwd: Optional[str],
-    ) -> str:
+    ) -> bytes:
         if candidate_indices is not None:
-            return native_history_response_json(
+            return native_history_response_frame(
                 query,
                 self.native_candidates,
                 candidate_indices=candidate_indices,
@@ -1478,7 +1477,7 @@ class DaemonHistoryState:
                 current_cwd=current_cwd,
             )
 
-        return native_history_response_json_for_daemon(
+        return native_history_response_frame_for_daemon(
             query,
             self.native_candidates,
             limit=limit,
@@ -1527,7 +1526,7 @@ def search_history_ranked_native(
     return results, matched_indices, matched_count
 
 
-def search_history_response_json_native(
+def search_history_response_frame_native(
     query: str,
     history: list[HistoryEntry],
     native_candidates: Any,
@@ -1535,11 +1534,11 @@ def search_history_response_json_native(
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     current_cwd: Optional[str] = None,
-) -> str:
-    """Return a complete daemon search response serialized inside Rust."""
+) -> bytes:
+    """Return a complete daemon search response encoded inside Rust."""
     if len(native_candidates) != len(history):
         raise ValueError("native and Python history lengths differ")
-    return native_history_response_json(
+    return native_history_response_frame(
         query,
         native_candidates,
         candidate_indices=candidate_indices,
@@ -1769,65 +1768,6 @@ def search(
     return results, matched_indices
 
 
-def daemon_send_serialized_request(
-    socket_path: Path,
-    data: bytes,
-    *,
-    timeout: float = 0.5,
-) -> Optional[bytes]:
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(timeout)
-            sock.connect(str(socket_path))
-            sock.sendall(data)
-            chunks: list[bytes] = []
-            total = 0
-            limit = 64 * 1024 * 1024
-            while True:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-                if total > limit:
-                    return None
-                if b"\n" in chunk:
-                    break
-    except OSError:
-        return None
-
-    raw = b"".join(chunks)
-    if not raw:
-        return None
-    line = raw.split(b"\n", 1)[0].strip()
-    if not line:
-        return None
-    return line
-
-
-def daemon_send_raw_request(
-    socket_path: Path,
-    payload: dict[str, Any],
-    *,
-    timeout: float = 0.5,
-) -> Optional[bytes]:
-    data = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
-    return daemon_send_serialized_request(socket_path, data, timeout=timeout)
-
-
-def daemon_send_request(socket_path: Path, payload: dict[str, Any], *, timeout: float = 0.5) -> Optional[dict[str, Any]]:
-    line = daemon_send_raw_request(socket_path, payload, timeout=timeout)
-    if line is None:
-        return None
-    try:
-        decoded = json.loads(line.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(decoded, dict):
-        return None
-    return decoded
-
-
 def launch_history_daemon(
     script_path: Path,
     history_path: Path,
@@ -1888,8 +1828,7 @@ class HistoryDaemonClient:
         self.use_custom_history = use_custom_history
 
     def ensure_running(self) -> bool:
-        ping = daemon_send_request(self.socket_path, {"action": "ping"}, timeout=0.15)
-        if isinstance(ping, dict) and ping.get("ok") is True:
+        if _native_ping_daemon(str(self.socket_path), 0.15):
             daemon_debug_log(self.debug, f"using existing daemon at {self.socket_path}")
             self._debug_log_baseline_count()
             return True
@@ -1914,8 +1853,7 @@ class HistoryDaemonClient:
 
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
-            ping = daemon_send_request(self.socket_path, {"action": "ping"}, timeout=0.15)
-            if isinstance(ping, dict) and ping.get("ok") is True:
+            if _native_ping_daemon(str(self.socket_path), 0.15):
                 daemon_debug_log(self.debug, "new daemon is ready")
                 self._debug_log_baseline_count()
                 return True
@@ -1926,16 +1864,13 @@ class HistoryDaemonClient:
     def _debug_log_baseline_count(self) -> None:
         if not self.debug:
             return
-        response = daemon_send_request(
-            self.socket_path,
-            {"action": "search_history", "query": "", "limit": 1},
-            timeout=0.2,
+        exchanged, response = _native_search_daemon(
+            str(self.socket_path), "", None, 1, None, 0.2
         )
-        if not isinstance(response, dict) or response.get("ok") is not True:
+        if not exchanged or response is None:
             daemon_debug_log(self.debug, "matched_count=<unavailable>")
             return
-        raw_count = response.get("matched_count")
-        count = raw_count if isinstance(raw_count, int) else 0
+        _, _, count = response
         daemon_debug_log(self.debug, f"matched_count={count} for empty query")
 
     def search_history(
@@ -2025,8 +1960,7 @@ def run_history_daemon(
         return 1
 
     if socket_path.exists():
-        ping = daemon_send_request(socket_path, {"action": "ping"}, timeout=0.15)
-        if isinstance(ping, dict) and ping.get("ok") is True:
+        if _native_ping_daemon(str(socket_path), 0.15):
             daemon_debug_log(debug, f"daemon already running at {socket_path}, exiting")
             return 0
         try:
@@ -2065,7 +1999,7 @@ def run_history_daemon(
                 limit=request.limit,
                 current_cwd=current_cwd,
             )
-            request.respond_serialized(response)
+            request.respond_frame(response)
     finally:
         try:
             socket_path.unlink()

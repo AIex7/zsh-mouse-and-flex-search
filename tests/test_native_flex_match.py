@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import random
 import socket
 import tempfile
@@ -55,18 +54,6 @@ def python_flex_match(
     score += max(0, 20 - (span - len(q)))
     score -= gap_penalty + len(candidate) // 8
     return engine.MatchResult(candidate, score, text_lower=c)
-
-
-def match_result_payload(item: engine.MatchResult) -> dict[str, object]:
-    return {
-        "text": item.text,
-        "score": item.score,
-        "exact": item.exact,
-        "recency": item.recency,
-        "cwd": item.cwd,
-        "failed": item.failed,
-        "words": list(item.words),
-    }
 
 
 class NativeFlexMatchTests(unittest.TestCase):
@@ -242,7 +229,7 @@ class NativeFlexMatchTests(unittest.TestCase):
                 query,
             )
 
-            serialized = engine.search_history_response_json_native(
+            frame = engine.search_history_response_frame_native(
                 query,
                 history,
                 native_candidates,
@@ -250,20 +237,9 @@ class NativeFlexMatchTests(unittest.TestCase):
                 limit=4,
                 current_cwd="/repo",
             )
-            self.assertEqual(
-                json.loads(serialized),
-                {
-                    "ok": True,
-                    "history_results": [
-                        match_result_payload(item) for item in expected_results
-                    ],
-                    "matched_indices": expected_payload,
-                    "matched_indices_omitted": expected_payload is None,
-                    "matched_count": len(expected_indices),
-                },
-                query,
-            )
-            parsed_response = native.parse_search_response(serialized.encode("utf-8"))
+            self.assertEqual(frame[:4], b"ZFH\x01")
+            self.assertEqual(int.from_bytes(frame[4:8], "little"), len(frame) - 8)
+            parsed_response = native.parse_search_response(frame)
             self.assertIsNotNone(parsed_response)
             assert parsed_response is not None
             parsed_results, parsed_indices, parsed_count = parsed_response
@@ -286,8 +262,7 @@ class NativeFlexMatchTests(unittest.TestCase):
                 query,
             )
 
-        self.assertIsNone(native.parse_search_response(b"not json"))
-        self.assertIsNone(native.parse_search_response(b'{"ok":false}'))
+        self.assertIsNone(native.parse_search_response(b"not a frame"))
 
     def test_native_search_request_serialization(self) -> None:
         serialized = native.serialize_search_request(
@@ -296,142 +271,78 @@ class NativeFlexMatchTests(unittest.TestCase):
             100,
             "/repo",
         )
-        self.assertTrue(serialized.endswith(b"\n"))
-        self.assertEqual(
-            json.loads(serialized),
-            {
-                "action": "search_history",
-                "query": "git st",
-                "candidate_indices": [1, 3, 8],
-                "limit": 100,
-                "cwd": "/repo",
-            },
-        )
-        self.assertEqual(
-            json.loads(native.serialize_search_request("x")),
-            {"action": "search_history", "query": "x"},
-        )
+        self.assertEqual(serialized[:4], b"ZFH\x01")
+        self.assertEqual(int.from_bytes(serialized[4:8], "little"), len(serialized) - 8)
+        self.assertEqual(serialized[8], 2)
+        self.assertNotIn(b"search_history", serialized)
+        minimal = native.serialize_search_request("x")
+        self.assertEqual(minimal[:4], b"ZFH\x01")
+        self.assertLess(len(minimal), len(serialized))
 
     def test_native_daemon_round_trip(self) -> None:
-        response = {
-            "ok": True,
-            "history_results": [
-                {
-                    "text": "git status --short",
-                    "score": 72,
-                    "exact": False,
-                    "recency": -3,
-                    "cwd": "/repo",
-                    "failed": False,
-                    "words": ["git", "status", "--short"],
-                }
-            ],
-            "matched_indices": [3, 8],
-            "matched_indices_omitted": False,
-            "matched_count": 2,
-        }
-        received: list[bytes] = []
+        history = [
+            engine.HistoryEntry(
+                "git status --short",
+                cwd="/repo",
+                text_lower="git status --short",
+                words=("git", "status", "--short"),
+            )
+        ]
+        candidates = engine.build_native_history_candidates(history)
+        received: list[tuple[str, list[int] | None, int | None, str | None]] = []
         with tempfile.TemporaryDirectory() as directory:
-            socket_path = str(Path(directory) / "history.sock")
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-                listener.bind(socket_path)
-                listener.listen(1)
+            socket_path = Path(directory) / "history.sock"
+            native_server = engine._NativeDaemonServer(str(socket_path))
 
-                def serve_twice() -> None:
-                    for _ in range(2):
-                        connection, _ = listener.accept()
-                        with connection:
-                            request = bytearray()
-                            while b"\n" not in request:
-                                chunk = connection.recv(65_536)
-                                if not chunk:
-                                    break
-                                request.extend(chunk)
-                            received.append(bytes(request))
-                            connection.sendall(json.dumps(response).encode("utf-8") + b"\n")
+            def serve_twice() -> None:
+                for _ in range(2):
+                    request = native_server.accept_search()
+                    received.append(
+                        (request.query, request.candidate_indices, request.limit, request.cwd)
+                    )
+                    frame = engine.native_history_response_frame(
+                        request.query,
+                        candidates,
+                        candidate_indices=request.candidate_indices,
+                        limit=request.limit,
+                        current_cwd=request.cwd,
+                    )
+                    self.assertTrue(request.respond_frame(frame))
 
-                server = threading.Thread(target=serve_twice)
-                server.start()
-                exchanged, parsed = engine._native_search_daemon(
-                    socket_path,
-                    "git st",
-                    array("I", [3, 8]),
-                    100,
-                    "/repo",
-                )
-                client = engine.HistoryDaemonClient(
-                    Path(socket_path),
-                    Path(directory) / "unused-history",
-                    Path(directory) / "unused-script",
-                )
-                client_result = client.search_history(
-                    "git st",
-                    candidate_indices=array("I", [3, 8]),
-                    limit=100,
-                    cwd="/repo",
-                )
-                server.join(timeout=2)
+            server = threading.Thread(target=serve_twice)
+            server.start()
+            exchanged, parsed = engine._native_search_daemon(
+                str(socket_path), "git st", array("I", [0]), 100, "/repo"
+            )
+            client = engine.HistoryDaemonClient(
+                socket_path,
+                Path(directory) / "unused-history",
+                Path(directory) / "unused-script",
+            )
+            client_result = client.search_history(
+                "git st", candidate_indices=array("I", [0]), limit=100, cwd="/repo"
+            )
+            server.join(timeout=2)
 
         self.assertFalse(server.is_alive())
         self.assertTrue(exchanged)
-        self.assertEqual(len(received), 2)
         self.assertEqual(
-            json.loads(received[0]),
-            {
-                "action": "search_history",
-                "query": "git st",
-                "candidate_indices": [3, 8],
-                "limit": 100,
-                "cwd": "/repo",
-            },
+            received,
+            [("git st", [0], 100, "/repo"), ("git st", [0], 100, "/repo")],
         )
-        self.assertEqual(json.loads(received[1]), json.loads(received[0]))
-        self.assertEqual(
-            parsed,
-            (
-                [
-                    (
-                        "git status --short",
-                        72,
-                        False,
-                        -3,
-                        "/repo",
-                        False,
-                        ["git", "status", "--short"],
-                    )
-                ],
-                [3, 8],
-                2,
-            ),
-        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed[1:], ([0], 1))
+        self.assertEqual(parsed[0][0][0], "git status --short")
         self.assertIsNotNone(client_result)
         assert client_result is not None
         client_results, client_indices, client_count = client_result
-        self.assertEqual(client_indices, [3, 8])
-        self.assertEqual(client_count, 2)
-        self.assertEqual(
-            client_results,
-            [
-                engine.MatchResult(
-                    text="git status --short",
-                    score=72,
-                    exact=False,
-                    recency=-3,
-                    cwd="/repo",
-                    failed=False,
-                    words=("git", "status", "--short"),
-                )
-            ],
-        )
+        self.assertEqual(client_indices, [0])
+        self.assertEqual(client_count, 1)
+        self.assertEqual(client_results[0].text, "git status --short")
 
     def test_native_daemon_server_dispatch(self) -> None:
-        response = {
-            "ok": True,
-            "history_results": [],
-            "matched_indices": [3],
-            "matched_indices_omitted": False,
-            "matched_count": 1,
-        }
+        candidates = engine.build_native_history_candidates([])
         captured: dict[str, object] = {}
         with tempfile.TemporaryDirectory() as directory:
             socket_path = Path(directory) / "native-server.sock"
@@ -443,41 +354,36 @@ class NativeFlexMatchTests(unittest.TestCase):
                 captured["candidate_indices"] = request.candidate_indices
                 captured["limit"] = request.limit
                 captured["cwd"] = request.cwd
-                captured["responded"] = request.respond_serialized(
-                    json.dumps(response, separators=(",", ":"))
+                response = engine.native_history_response_frame(
+                    request.query,
+                    candidates,
+                    candidate_indices=request.candidate_indices,
+                    limit=request.limit,
+                    current_cwd=request.cwd,
                 )
+                captured["responded"] = request.respond_frame(response)
 
             server_thread = threading.Thread(target=serve_search)
             server_thread.start()
 
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as malformed_client:
                 malformed_client.connect(str(socket_path))
-                malformed_client.sendall(b"not json\n")
+                malformed_client.sendall(b"notframe")
                 malformed_response = malformed_client.recv(4096)
 
-            ping = engine.daemon_send_request(socket_path, {"action": "ping"})
-            unknown = engine.daemon_send_request(socket_path, {"action": "unknown"})
-            search_response = engine.daemon_send_request(
-                socket_path,
-                {
-                    "action": "search_history",
-                    "query": "git st",
-                    "candidate_indices": [-1, 3],
-                    "limit": 100,
-                    "cwd": "/repo",
-                },
+            ping = native.ping_daemon(str(socket_path))
+            exchanged, search_response = engine._native_search_daemon(
+                str(socket_path), "git st", [3], 100, "/repo"
             )
             server_thread.join(timeout=2)
             socket_mode = socket_path.stat().st_mode & 0o777
 
         self.assertFalse(server_thread.is_alive())
-        self.assertEqual(
-            json.loads(malformed_response),
-            {"ok": False, "error": "invalid request"},
-        )
-        self.assertEqual(ping, {"ok": True})
-        self.assertEqual(unknown, {"ok": False, "error": "unknown action"})
-        self.assertEqual(search_response, response)
+        self.assertEqual(malformed_response[:4], b"ZFH\x01")
+        self.assertEqual(malformed_response[8], 0xFF)
+        self.assertTrue(ping)
+        self.assertTrue(exchanged)
+        self.assertEqual(search_response, ([], [], 0))
         self.assertEqual(socket_mode, 0o600)
         self.assertEqual(
             captured,

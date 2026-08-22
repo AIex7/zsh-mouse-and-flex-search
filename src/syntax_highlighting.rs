@@ -237,8 +237,8 @@ fn classify_word(
         return Ok(DEFAULT);
     }
     let result = command_state.call1((word, word_complete))?;
-    let state: &str = result.extract()?;
-    Ok(match state {
+    let state: String = result.extract()?;
+    Ok(match state.as_str() {
         "valid" => COMMAND,
         "error" => ERROR,
         _ => DEFAULT,

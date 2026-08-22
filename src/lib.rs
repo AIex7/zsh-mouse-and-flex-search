@@ -1,8 +1,6 @@
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use serde::ser::SerializeSeq;
-use serde::{Deserialize, Serialize, Serializer};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -22,6 +20,13 @@ mod syntax_highlighting;
 
 const WORD_BOUNDARIES: &str = " _-/.:";
 const MAX_DAEMON_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const FRAME_MAGIC: [u8; 4] = *b"ZFH\x01";
+const FRAME_HEADER_BYTES: usize = 8;
+const FRAME_PING_REQUEST: u8 = 1;
+const FRAME_SEARCH_REQUEST: u8 = 2;
+const FRAME_SEARCH_RESPONSE: u8 = 0x81;
+const FRAME_PONG_RESPONSE: u8 = 0x82;
+const FRAME_ERROR_RESPONSE: u8 = 0xff;
 const MAX_DAEMON_QUERY_CACHE_ENTRIES: usize = 64;
 const MAX_DAEMON_QUERY_CACHE_INDICES: usize = 1_000_000;
 
@@ -892,106 +897,182 @@ struct RankedMatch {
     scan_order: usize,
 }
 
-struct CandidateWords<'a>(&'a NativeCandidate);
-
-impl Serialize for CandidateWords<'_> {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut sequence = serializer.serialize_seq(Some(self.0.word_count()))?;
-        for index in 0..self.0.word_count() {
-            if let Some(word) = self.0.word(index) {
-                sequence.serialize_element(word)?;
-            }
-        }
-        sequence.end()
-    }
-}
-
-#[derive(Serialize)]
-struct HistoryResultPayload<'a> {
-    text: &'a str,
-    score: i64,
-    exact: bool,
-    recency: i64,
-    cwd: Option<&'a str>,
-    failed: bool,
-    words: CandidateWords<'a>,
-}
-
-#[derive(Serialize)]
-struct SearchResponsePayload<'a> {
-    ok: bool,
-    history_results: Vec<HistoryResultPayload<'a>>,
-    matched_indices: Option<&'a [usize]>,
-    matched_indices_omitted: bool,
-    matched_count: usize,
-}
-
-#[derive(Serialize)]
-struct SearchRequestPayload<'a> {
-    action: &'static str,
-    query: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    candidate_indices: Option<&'a [usize]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    limit: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cwd: Option<&'a str>,
-}
-
-#[derive(Deserialize)]
-struct ParsedHistoryResult {
-    text: String,
-    score: i64,
-    #[serde(default)]
-    exact: bool,
-    #[serde(default)]
-    recency: i64,
-    cwd: Option<String>,
-    #[serde(default)]
-    failed: bool,
-    #[serde(default)]
-    words: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct ParsedSearchResponse {
-    #[serde(default)]
-    ok: bool,
-    history_results: Vec<ParsedHistoryResult>,
-    matched_indices: Option<Vec<usize>>,
-    matched_count: Option<usize>,
-}
-
 type ParsedResult = (String, i64, bool, i64, Option<String>, bool, Vec<String>);
 type ParsedResponse = (Vec<ParsedResult>, Option<Vec<usize>>, usize);
 
+struct FrameWriter {
+    payload: Vec<u8>,
+}
+
+impl FrameWriter {
+    fn new(kind: u8) -> Self {
+        Self { payload: vec![kind] }
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.payload.push(value);
+    }
+
+    fn u32(&mut self, value: usize) -> Result<(), &'static str> {
+        let value = u32::try_from(value).map_err(|_| "binary frame field is too large")?;
+        self.payload.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    fn u64(&mut self, value: usize) -> Result<(), &'static str> {
+        let value = u64::try_from(value).map_err(|_| "binary frame integer is too large")?;
+        self.payload.extend_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+
+    fn i64(&mut self, value: i64) {
+        self.payload.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn string(&mut self, value: &str) -> Result<(), &'static str> {
+        self.u32(value.len())?;
+        self.payload.extend_from_slice(value.as_bytes());
+        Ok(())
+    }
+
+    fn optional_string(&mut self, value: Option<&str>) -> Result<(), &'static str> {
+        self.byte(u8::from(value.is_some()));
+        if let Some(value) = value {
+            self.string(value)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Vec<u8>, &'static str> {
+        if self.payload.len() > MAX_DAEMON_MESSAGE_BYTES {
+            return Err("binary frame exceeds daemon message limit");
+        }
+        let payload_len = u32::try_from(self.payload.len())
+            .map_err(|_| "binary frame exceeds its length field")?;
+        let mut frame = Vec::with_capacity(FRAME_HEADER_BYTES + self.payload.len());
+        frame.extend_from_slice(&FRAME_MAGIC);
+        frame.extend_from_slice(&payload_len.to_le_bytes());
+        frame.extend_from_slice(&self.payload);
+        Ok(frame)
+    }
+}
+
+struct FrameReader<'a> {
+    payload: &'a [u8],
+    position: usize,
+}
+
+impl<'a> FrameReader<'a> {
+    fn new(frame: &'a [u8], expected_kind: u8) -> Option<Self> {
+        if frame.len() < FRAME_HEADER_BYTES || frame[..4] != FRAME_MAGIC {
+            return None;
+        }
+        let payload_len = u32::from_le_bytes(frame[4..8].try_into().ok()?) as usize;
+        if payload_len == 0
+            || payload_len > MAX_DAEMON_MESSAGE_BYTES
+            || frame.len() != FRAME_HEADER_BYTES + payload_len
+            || frame[FRAME_HEADER_BYTES] != expected_kind
+        {
+            return None;
+        }
+        Some(Self {
+            payload: &frame[FRAME_HEADER_BYTES..],
+            position: 1,
+        })
+    }
+
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let end = self.position.checked_add(count)?;
+        let value = self.payload.get(self.position..end)?;
+        self.position = end;
+        Some(value)
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        Some(*self.take(1)?.first()?)
+    }
+
+    fn bool(&mut self) -> Option<bool> {
+        match self.byte()? {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+
+    fn u32(&mut self) -> Option<usize> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?) as usize)
+    }
+
+    fn u64(&mut self) -> Option<usize> {
+        usize::try_from(u64::from_le_bytes(self.take(8)?.try_into().ok()?)).ok()
+    }
+
+    fn i64(&mut self) -> Option<i64> {
+        Some(i64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn string(&mut self) -> Option<String> {
+        let length = self.u32()?;
+        String::from_utf8(self.take(length)?.to_vec()).ok()
+    }
+
+    fn optional_string(&mut self) -> Option<Option<String>> {
+        if self.bool()? {
+            Some(Some(self.string()?))
+        } else {
+            Some(None)
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.position == self.payload.len()
+    }
+
+    fn remaining(&self) -> usize {
+        self.payload.len() - self.position
+    }
+}
+
 fn parse_search_response_bytes(raw: &[u8]) -> Option<ParsedResponse> {
-    let response: ParsedSearchResponse = serde_json::from_slice(raw).ok()?;
-    if !response.ok {
+    let mut reader = FrameReader::new(raw, FRAME_SEARCH_RESPONSE)?;
+    let matched_count = reader.u64()?;
+    let matched_indices = if reader.bool()? {
+        let count = reader.u32()?;
+        if count > reader.remaining() / 8 {
+            return None;
+        }
+        let mut indices = Vec::with_capacity(count);
+        for _ in 0..count {
+            indices.push(reader.u64()?);
+        }
+        Some(indices)
+    } else {
+        None
+    };
+    let result_count = reader.u32()?;
+    if result_count > reader.remaining() / 27 {
         return None;
     }
-    let matched_count = response
-        .matched_count
-        .unwrap_or_else(|| response.matched_indices.as_ref().map_or(0, Vec::len));
-    let results = response
-        .history_results
-        .into_iter()
-        .map(|result| {
-            (
-                result.text,
-                result.score,
-                result.exact,
-                result.recency,
-                result.cwd,
-                result.failed,
-                result.words,
-            )
-        })
-        .collect();
-    Some((results, response.matched_indices, matched_count))
+    let mut results = Vec::with_capacity(result_count);
+    for _ in 0..result_count {
+        let text = reader.string()?;
+        let score = reader.i64()?;
+        let exact = reader.bool()?;
+        let recency = reader.i64()?;
+        let cwd = reader.optional_string()?;
+        let failed = reader.bool()?;
+        let word_count = reader.u32()?;
+        if word_count > reader.remaining() / 4 {
+            return None;
+        }
+        let mut words = Vec::with_capacity(word_count);
+        for _ in 0..word_count {
+            words.push(reader.string()?);
+        }
+        results.push((text, score, exact, recency, cwd, failed, words));
+    }
+    reader.done().then_some((results, matched_indices, matched_count))
 }
 
 fn serialize_search_request_bytes(
@@ -999,17 +1080,28 @@ fn serialize_search_request_bytes(
     candidate_indices: Option<&[usize]>,
     limit: Option<i64>,
     cwd: Option<&str>,
-) -> Result<Vec<u8>, serde_json::Error> {
-    let payload = SearchRequestPayload {
-        action: "search_history",
-        query,
-        candidate_indices,
-        limit,
-        cwd,
-    };
-    let mut serialized = serde_json::to_vec(&payload)?;
-    serialized.push(b'\n');
-    Ok(serialized)
+) -> Result<Vec<u8>, &'static str> {
+    let mut writer = FrameWriter::new(FRAME_SEARCH_REQUEST);
+    writer.string(query)?;
+    writer.byte(u8::from(candidate_indices.is_some()));
+    if let Some(indices) = candidate_indices {
+        writer.u32(indices.len())?;
+        for &index in indices {
+            writer.u64(index)?;
+        }
+    }
+    writer.byte(u8::from(limit.is_some()));
+    if let Some(limit) = limit {
+        writer.i64(limit);
+    }
+    writer.optional_string(cwd)?;
+    writer.finish()
+}
+
+fn serialize_ping_request_bytes() -> Vec<u8> {
+    FrameWriter::new(FRAME_PING_REQUEST)
+        .finish()
+        .expect("fixed ping frame fits")
 }
 
 fn daemon_exchange_bytes(
@@ -1022,84 +1114,34 @@ fn daemon_exchange_bytes(
     stream.set_write_timeout(Some(timeout)).ok()?;
     stream.write_all(request).ok()?;
 
-    let mut response = Vec::new();
-    let mut buffer = [0_u8; 65_536];
-    loop {
-        let count = stream.read(&mut buffer).ok()?;
-        if count == 0 {
-            break;
-        }
-        let chunk = &buffer[..count];
-        if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
-            if response.len() + newline > MAX_DAEMON_MESSAGE_BYTES {
-                return None;
-            }
-            response.extend_from_slice(&chunk[..newline]);
-            break;
-        }
-        response.extend_from_slice(chunk);
-        if response.len() > MAX_DAEMON_MESSAGE_BYTES {
-            return None;
-        }
-    }
-
-    let start = response
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())?;
-    let end = response
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())?
-        + 1;
-    if start > 0 {
-        response.drain(..start);
-    }
-    response.truncate(end - start);
-    Some(response)
+    read_daemon_message(&mut stream)
 }
 
 fn read_daemon_message(stream: &mut UnixStream) -> Option<Vec<u8>> {
-    let mut message = Vec::new();
-    let mut buffer = [0_u8; 65_536];
-    loop {
-        let count = stream.read(&mut buffer).ok()?;
-        if count == 0 {
-            break;
-        }
-        let chunk = &buffer[..count];
-        if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
-            if message.len() + newline > MAX_DAEMON_MESSAGE_BYTES {
-                return None;
-            }
-            message.extend_from_slice(&chunk[..newline]);
-            break;
-        }
-        message.extend_from_slice(chunk);
-        if message.len() > MAX_DAEMON_MESSAGE_BYTES {
-            return None;
-        }
+    let mut header = [0_u8; FRAME_HEADER_BYTES];
+    stream.read_exact(&mut header).ok()?;
+    if header[..4] != FRAME_MAGIC {
+        return None;
     }
-    let start = message
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())?;
-    let end = message
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())?
-        + 1;
-    Some(message[start..end].to_vec())
+    let payload_len = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+    if payload_len == 0 || payload_len > MAX_DAEMON_MESSAGE_BYTES {
+        return None;
+    }
+    let mut message = Vec::with_capacity(FRAME_HEADER_BYTES + payload_len);
+    message.extend_from_slice(&header);
+    message.resize(FRAME_HEADER_BYTES + payload_len, 0);
+    stream.read_exact(&mut message[FRAME_HEADER_BYTES..]).ok()?;
+    Some(message)
 }
 
 fn write_daemon_message(stream: &mut UnixStream, payload: &[u8]) -> bool {
-    stream.write_all(payload).is_ok() && stream.write_all(b"\n").is_ok()
+    stream.write_all(payload).is_ok()
 }
 
-fn json_value_as_python_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "None".to_owned(),
-        serde_json::Value::Bool(true) => "True".to_owned(),
-        serde_json::Value::Bool(false) => "False".to_owned(),
-        serde_json::Value::String(value) => value.clone(),
-        _ => value.to_string(),
-    }
+fn error_frame(message: &str) -> Vec<u8> {
+    let mut writer = FrameWriter::new(FRAME_ERROR_RESPONSE);
+    writer.string(message).expect("static error message fits");
+    writer.finish().expect("static error frame fits")
 }
 
 struct AcceptedSearchRequest {
@@ -1141,10 +1183,10 @@ impl NativeSearchRequest {
         self.cwd.as_deref()
     }
 
-    fn respond_serialized(&mut self, payload: &str) -> bool {
+    fn respond_frame(&mut self, payload: &[u8]) -> bool {
         self.stream
             .take()
-            .is_some_and(|mut stream| write_daemon_message(&mut stream, payload.as_bytes()))
+            .is_some_and(|mut stream| write_daemon_message(&mut stream, payload))
     }
 }
 
@@ -1158,56 +1200,61 @@ impl NativeDaemonServer {
         loop {
             let (mut stream, _) = self.listener.accept()?;
             let Some(raw) = read_daemon_message(&mut stream) else {
-                write_daemon_message(
-                    &mut stream,
-                    br#"{"ok":false,"error":"invalid request"}"#,
-                );
+                write_daemon_message(&mut stream, &error_frame("invalid request"));
                 continue;
             };
-            let Ok(serde_json::Value::Object(request)) = serde_json::from_slice(&raw) else {
-                write_daemon_message(
-                    &mut stream,
-                    br#"{"ok":false,"error":"invalid request"}"#,
-                );
+            let Some(&kind) = raw.get(FRAME_HEADER_BYTES) else {
+                write_daemon_message(&mut stream, &error_frame("invalid request"));
                 continue;
             };
-            let action = request.get("action").and_then(serde_json::Value::as_str);
-            if action == Some("ping") {
-                write_daemon_message(&mut stream, br#"{"ok":true}"#);
+            if kind == FRAME_PING_REQUEST {
+                let valid = FrameReader::new(&raw, FRAME_PING_REQUEST).is_some_and(|reader| reader.done());
+                if valid {
+                    let pong = FrameWriter::new(FRAME_PONG_RESPONSE)
+                        .finish()
+                        .expect("fixed pong frame fits");
+                    write_daemon_message(&mut stream, &pong);
+                } else {
+                    write_daemon_message(&mut stream, &error_frame("invalid request"));
+                }
                 continue;
             }
-            if action != Some("search_history") {
-                write_daemon_message(
-                    &mut stream,
-                    br#"{"ok":false,"error":"unknown action"}"#,
-                );
+            if kind != FRAME_SEARCH_REQUEST {
+                write_daemon_message(&mut stream, &error_frame("unknown frame type"));
                 continue;
             }
 
-            let query = request
-                .get("query")
-                .map_or_else(String::new, json_value_as_python_string);
-            let candidate_indices = request.get("candidate_indices").and_then(|value| {
-                value.as_array().map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| match value {
-                            serde_json::Value::Bool(value) => Some(usize::from(*value)),
-                            _ => value
-                                .as_i64()
-                                .and_then(|index| usize::try_from(index).ok()),
-                        })
-                        .collect()
-                })
-            });
-            let limit = request.get("limit").and_then(|value| match value {
-                serde_json::Value::Bool(value) => Some(i64::from(*value)),
-                _ => value.as_i64(),
-            });
-            let cwd = request
-                .get("cwd")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
+            let Some(mut reader) = FrameReader::new(&raw, FRAME_SEARCH_REQUEST) else {
+                write_daemon_message(&mut stream, &error_frame("invalid request"));
+                continue;
+            };
+            let parsed = (|| {
+                let query = reader.string()?;
+                let candidate_indices = if reader.bool()? {
+                    let count = reader.u32()?;
+                    if count > reader.remaining() / 8 {
+                        return None;
+                    }
+                    let mut indices = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        indices.push(reader.u64()?);
+                    }
+                    Some(indices)
+                } else {
+                    None
+                };
+                let limit = if reader.bool()? {
+                    Some(reader.i64()?)
+                } else {
+                    None
+                };
+                let cwd = reader.optional_string()?;
+                reader.done().then_some((query, candidate_indices, limit, cwd))
+            })();
+            let Some((query, candidate_indices, limit, cwd)) = parsed else {
+                write_daemon_message(&mut stream, &error_frame("invalid request"));
+                continue;
+            };
             return Ok(AcceptedSearchRequest {
                 stream,
                 query,
@@ -1298,30 +1345,31 @@ impl NativeHistory {
         selected: &[(usize, i64)],
         matched_indices: Option<&[usize]>,
         matched_count: usize,
-    ) -> PyResult<String> {
-        let history_results = selected
-            .iter()
-            .map(|(index, score)| {
-                let candidate = &self.candidates[*index];
-                HistoryResultPayload {
-                    text: &candidate.text,
-                    score: *score,
-                    exact: false,
-                    recency: -(*index as i64),
-                    cwd: candidate.cwd.as_deref(),
-                    failed: candidate.failed,
-                    words: CandidateWords(candidate),
-                }
-            })
-            .collect();
-        let response = SearchResponsePayload {
-            ok: true,
-            history_results,
-            matched_indices,
-            matched_indices_omitted: matched_indices.is_none(),
-            matched_count,
-        };
-        serde_json::to_string(&response).map_err(|error| PyValueError::new_err(error.to_string()))
+    ) -> Result<Vec<u8>, &'static str> {
+        let mut writer = FrameWriter::new(FRAME_SEARCH_RESPONSE);
+        writer.u64(matched_count)?;
+        writer.byte(u8::from(matched_indices.is_some()));
+        if let Some(indices) = matched_indices {
+            writer.u32(indices.len())?;
+            for &index in indices {
+                writer.u64(index)?;
+            }
+        }
+        writer.u32(selected.len())?;
+        for &(index, score) in selected {
+            let candidate = &self.candidates[index];
+            writer.string(&candidate.text)?;
+            writer.i64(score);
+            writer.byte(0); // exact
+            writer.i64(-(index as i64));
+            writer.optional_string(candidate.cwd.as_deref())?;
+            writer.byte(u8::from(candidate.failed));
+            writer.u32(candidate.word_count())?;
+            for word_index in 0..candidate.word_count() {
+                writer.string(candidate.word(word_index).unwrap_or_default())?;
+            }
+        }
+        writer.finish()
     }
 
     /// Select an empty-query result page without constructing one ranked item
@@ -1881,9 +1929,9 @@ impl NativeHistory {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn search_response_json(
+    fn search_response_frame<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         query_lower: &str,
         normalized_query: &str,
         prefix_query_words: Vec<String>,
@@ -1892,7 +1940,7 @@ impl NativeHistory {
         candidate_indices: Option<Vec<usize>>,
         limit: Option<usize>,
         max_returned_indices: usize,
-    ) -> PyResult<String> {
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let (selected, matched_indices, matched_count) = self.search_ranked(
             py,
             query_lower,
@@ -1904,19 +1952,18 @@ impl NativeHistory {
             limit,
             max_returned_indices,
         );
-        self.serialize_ranked_response(
-            &selected,
-            matched_indices.as_deref(),
-            matched_count,
-        )
+        let frame = self
+            .serialize_ranked_response(&selected, matched_indices.as_deref(), matched_count)
+            .map_err(PyValueError::new_err)?;
+        Ok(PyBytes::new(py, &frame))
     }
 
     /// Cache the complete match set in-process and omit it from the serialized
     /// daemon response sent to the client.
     #[allow(clippy::too_many_arguments)]
-    fn search_response_json_for_daemon(
+    fn search_response_frame_for_daemon<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         query_lower: &str,
         normalized_query: &str,
         prefix_query_words: Vec<String>,
@@ -1924,7 +1971,7 @@ impl NativeHistory {
         current_cwd: Option<String>,
         candidate_indices: Option<Vec<usize>>,
         limit: Option<usize>,
-    ) -> PyResult<String> {
+    ) -> PyResult<Bound<'py, PyBytes>> {
         let cache_enabled = candidate_indices.is_none() && !query_lower.is_empty();
         let cached_indices = if cache_enabled {
             self.daemon_query_cache
@@ -1953,7 +2000,10 @@ impl NativeHistory {
                     .insert(query_lower, indices);
             }
         }
-        self.serialize_ranked_response(&selected, None, matched_count)
+        let frame = self
+            .serialize_ranked_response(&selected, None, matched_count)
+            .map_err(PyValueError::new_err)?;
+        Ok(PyBytes::new(py, &frame))
     }
 }
 
@@ -1977,8 +2027,21 @@ fn serialize_search_request<'py>(
     cwd: Option<&str>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let serialized = serialize_search_request_bytes(query, candidate_indices.as_deref(), limit, cwd)
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        .map_err(PyValueError::new_err)?;
     Ok(PyBytes::new(py, &serialized))
+}
+
+#[pyfunction]
+#[pyo3(signature = (socket_path, timeout_seconds=0.5))]
+fn ping_daemon(py: Python<'_>, socket_path: &str, timeout_seconds: f64) -> bool {
+    let Ok(timeout) = Duration::try_from_secs_f64(timeout_seconds) else {
+        return false;
+    };
+    let request = serialize_ping_request_bytes();
+    let response = py.allow_threads(|| daemon_exchange_bytes(socket_path, &request, timeout));
+    response.is_some_and(|response| {
+        FrameReader::new(&response, FRAME_PONG_RESPONSE).is_some_and(|reader| reader.done())
+    })
 }
 
 #[pyfunction]
@@ -2016,12 +2079,92 @@ fn _flex_match(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(flex_match, module)?)?;
     module.add_function(wrap_pyfunction!(parse_search_response, module)?)?;
     module.add_function(wrap_pyfunction!(serialize_search_request, module)?)?;
+    module.add_function(wrap_pyfunction!(ping_daemon, module)?)?;
     module.add_function(wrap_pyfunction!(search_daemon, module)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_search_request_is_versioned_and_length_prefixed() {
+        let frame = serialize_search_request_bytes(
+            "git st",
+            Some(&[1, 3, 8]),
+            Some(100),
+            Some("/repo"),
+        )
+        .unwrap();
+        assert_eq!(&frame[..4], &FRAME_MAGIC);
+        assert_eq!(
+            u32::from_le_bytes(frame[4..8].try_into().unwrap()) as usize,
+            frame.len() - FRAME_HEADER_BYTES
+        );
+
+        let mut reader = FrameReader::new(&frame, FRAME_SEARCH_REQUEST).unwrap();
+        assert_eq!(reader.string().as_deref(), Some("git st"));
+        assert_eq!(reader.bool(), Some(true));
+        assert_eq!(reader.u32(), Some(3));
+        assert_eq!(reader.u64(), Some(1));
+        assert_eq!(reader.u64(), Some(3));
+        assert_eq!(reader.u64(), Some(8));
+        assert_eq!(reader.bool(), Some(true));
+        assert_eq!(reader.i64(), Some(100));
+        assert_eq!(reader.optional_string().unwrap().as_deref(), Some("/repo"));
+        assert!(reader.done());
+    }
+
+    #[test]
+    fn binary_search_response_round_trips() {
+        let mut writer = FrameWriter::new(FRAME_SEARCH_RESPONSE);
+        writer.u64(2).unwrap();
+        writer.byte(1);
+        writer.u32(2).unwrap();
+        writer.u64(3).unwrap();
+        writer.u64(8).unwrap();
+        writer.u32(1).unwrap();
+        writer.string("git status --short").unwrap();
+        writer.i64(72);
+        writer.byte(0);
+        writer.i64(-3);
+        writer.optional_string(Some("/repo")).unwrap();
+        writer.byte(0);
+        writer.u32(3).unwrap();
+        writer.string("git").unwrap();
+        writer.string("status").unwrap();
+        writer.string("--short").unwrap();
+
+        assert_eq!(
+            parse_search_response_bytes(&writer.finish().unwrap()),
+            Some((
+                vec![(
+                    "git status --short".to_owned(),
+                    72,
+                    false,
+                    -3,
+                    Some("/repo".to_owned()),
+                    false,
+                    vec!["git".to_owned(), "status".to_owned(), "--short".to_owned()],
+                )],
+                Some(vec![3, 8]),
+                2,
+            ))
+        );
+    }
+
+    #[test]
+    fn binary_response_parser_rejects_truncation_and_trailing_bytes() {
+        let mut frame = FrameWriter::new(FRAME_SEARCH_RESPONSE);
+        frame.u64(0).unwrap();
+        frame.byte(0);
+        frame.u32(0).unwrap();
+        let frame = frame.finish().unwrap();
+        assert!(parse_search_response_bytes(&frame[..frame.len() - 1]).is_none());
+        let mut trailing = frame;
+        trailing.push(0);
+        assert!(parse_search_response_bytes(&trailing).is_none());
+    }
 
     #[test]
     fn compact_word_field_does_not_enlarge_native_candidate_layout() {
