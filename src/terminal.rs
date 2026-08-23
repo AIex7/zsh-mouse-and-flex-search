@@ -259,6 +259,14 @@ pub fn parse_background_color_response(bytes: &[u8]) -> Option<String> {
     parse_osc_color_response(bytes, 11)
 }
 
+pub fn parse_selection_background_color_response(bytes: &[u8]) -> Option<String> {
+    parse_osc_color_response(bytes, 17)
+}
+
+pub fn parse_selection_foreground_color_response(bytes: &[u8]) -> Option<String> {
+    parse_osc_color_response(bytes, 19)
+}
+
 fn configured_terminal_color(name: &str) -> (Option<String>, bool) {
     if let Ok(env_val) = std::env::var(name) {
         let val = env_val.trim().to_lowercase();
@@ -272,14 +280,34 @@ fn configured_terminal_color(name: &str) -> (Option<String>, bool) {
     (None, true)
 }
 
-pub fn query_terminal_colors(fd: RawFd) -> (Option<String>, Option<String>) {
+pub fn query_terminal_colors(
+    fd: RawFd,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let (mut cursor_color, query_cursor) =
         configured_terminal_color("ZSH_FLEX_HISTORY_CURSOR_COLOR");
     let (mut background_color, query_background) =
         configured_terminal_color("ZSH_FLEX_HISTORY_BACKGROUND_COLOR");
+    let (mut selection_background_color, query_selection_background) =
+        configured_terminal_color("ZSH_FLEX_HISTORY_SELECTION_BACKGROUND_COLOR");
+    let (mut selection_foreground_color, query_selection_foreground) =
+        configured_terminal_color("ZSH_FLEX_HISTORY_SELECTION_FOREGROUND_COLOR");
 
-    if !query_cursor && !query_background {
-        return (cursor_color, background_color);
+    if !query_cursor
+        && !query_background
+        && !query_selection_background
+        && !query_selection_foreground
+    {
+        return (
+            cursor_color,
+            background_color,
+            selection_background_color,
+            selection_foreground_color,
+        );
     }
 
     drain_input(fd);
@@ -289,6 +317,12 @@ pub fn query_terminal_colors(fd: RawFd) -> (Option<String>, Option<String>) {
     }
     if query_cursor {
         request.push_str("\x1b]12;?\x07");
+    }
+    if query_selection_background {
+        request.push_str("\x1b]17;?\x07");
+    }
+    if query_selection_foreground {
+        request.push_str("\x1b]19;?\x07");
     }
     term_write(fd, &request);
 
@@ -310,8 +344,16 @@ pub fn query_terminal_colors(fd: RawFd) -> (Option<String>, Option<String>) {
         if query_cursor && cursor_color.is_none() {
             cursor_color = parse_cursor_color_response(&buf);
         }
+        if query_selection_background && selection_background_color.is_none() {
+            selection_background_color = parse_selection_background_color_response(&buf);
+        }
+        if query_selection_foreground && selection_foreground_color.is_none() {
+            selection_foreground_color = parse_selection_foreground_color_response(&buf);
+        }
         if (!query_background || background_color.is_some())
             && (!query_cursor || cursor_color.is_some())
+            && (!query_selection_background || selection_background_color.is_some())
+            && (!query_selection_foreground || selection_foreground_color.is_some())
         {
             break;
         }
@@ -329,7 +371,24 @@ pub fn query_terminal_colors(fd: RawFd) -> (Option<String>, Option<String>) {
         let color = background_color.as_deref().unwrap_or_default();
         std::env::set_var("ZSH_FLEX_HISTORY_BACKGROUND_COLOR", color);
     }
-    (cursor_color, background_color)
+    if query_selection_background && selection_background_color.is_none() {
+        std::env::set_var("ZSH_FLEX_HISTORY_SELECTION_BACKGROUND_COLOR", "none");
+    } else if query_selection_background {
+        let color = selection_background_color.as_deref().unwrap_or_default();
+        std::env::set_var("ZSH_FLEX_HISTORY_SELECTION_BACKGROUND_COLOR", color);
+    }
+    if query_selection_foreground && selection_foreground_color.is_none() {
+        std::env::set_var("ZSH_FLEX_HISTORY_SELECTION_FOREGROUND_COLOR", "none");
+    } else if query_selection_foreground {
+        let color = selection_foreground_color.as_deref().unwrap_or_default();
+        std::env::set_var("ZSH_FLEX_HISTORY_SELECTION_FOREGROUND_COLOR", color);
+    }
+    (
+        cursor_color,
+        background_color,
+        selection_background_color,
+        selection_foreground_color,
+    )
 }
 
 pub fn query_cursor_color(fd: RawFd) -> Option<String> {
@@ -338,6 +397,14 @@ pub fn query_cursor_color(fd: RawFd) -> Option<String> {
 
 pub fn query_background_color(fd: RawFd) -> Option<String> {
     query_terminal_colors(fd).1
+}
+
+pub fn query_selection_background_color(fd: RawFd) -> Option<String> {
+    query_terminal_colors(fd).2
+}
+
+pub fn query_selection_foreground_color(fd: RawFd) -> Option<String> {
+    query_terminal_colors(fd).3
 }
 
 pub fn write_clipboard(text: &str) -> bool {
@@ -420,5 +487,23 @@ mod terminal_tests {
             Some("#fff0e5".to_string())
         );
         assert_eq!(parse_cursor_color_response(raw), Some("#205798".to_string()));
+    }
+
+    #[test]
+    fn parses_all_terminal_colors_from_one_response() {
+        let raw = b"\x1b]11;rgb:ffff/f0f0/e5e5\x07\x1b]12;rgb:2020/5757/9898\x1b\\\x1b]17;rgb:3030/6060/9090\x07\x1b]19;rgb:eeee/dddd/cccc\x1b\\";
+        assert_eq!(
+            parse_background_color_response(raw),
+            Some("#fff0e5".to_string())
+        );
+        assert_eq!(parse_cursor_color_response(raw), Some("#205798".to_string()));
+        assert_eq!(
+            parse_selection_background_color_response(raw),
+            Some("#306090".to_string())
+        );
+        assert_eq!(
+            parse_selection_foreground_color_response(raw),
+            Some("#eeddcc".to_string())
+        );
     }
 }

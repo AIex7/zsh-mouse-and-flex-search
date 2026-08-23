@@ -104,8 +104,26 @@ pub fn run(
         }
     };
 
-    let (cursor_color_override, background_color_override) = query_terminal_colors(fd);
+    let (
+        cursor_color_override,
+        background_color_override,
+        selection_background_color_override,
+        selection_foreground_color_override,
+    ) = query_terminal_colors(fd);
     let cursor_text_color = background_color_override.as_deref().unwrap_or(DORIC_FG_MAIN);
+    let selection_style = style(StyleOptions {
+        fg_rgb: Some(
+            selection_foreground_color_override
+                .as_deref()
+                .unwrap_or(DORIC_FG_BLUE),
+        ),
+        bg_rgb: Some(
+            selection_background_color_override
+                .as_deref()
+                .unwrap_or(DORIC_BG_BLUE),
+        ),
+        ..Default::default()
+    });
     let visual_cursor_bg_style = if let Some(color_hex) = &cursor_color_override {
         style(StyleOptions {
             fg_rgb: Some(cursor_text_color),
@@ -659,6 +677,7 @@ pub fn run(
             Some(&query_rows),
             &mut render_state,
             &visual_cursor_bg_style,
+            &selection_style,
         );
         query_start = qs;
         query_rows_used = qru;

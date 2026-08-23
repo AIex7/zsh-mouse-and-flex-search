@@ -356,6 +356,7 @@ pub fn draw_panel(
     query_rows_override: Option<&[QueryVisualRow]>,
     state: &mut PanelRenderState,
     visual_cursor_bg_style: &str,
+    selection_style: &str,
 ) -> (usize, usize, usize, usize) {
     let anchor_col = anchor_col.max(1);
     let render_width = terminal_safe_render_width(width, anchor_col);
@@ -402,12 +403,6 @@ pub fn draw_panel(
     let visible_query_rows = &query_rows[query_start..query_start + query_rows_used];
     let sel = selection_bounds(sel_anchor, sel_end);
 
-    let selection_bg_style = style(StyleOptions {
-        fg_rgb: Some(DORIC_FG_BLUE),
-        bg_rgb: Some(DORIC_BG_BLUE),
-        ..Default::default()
-    });
-
     let mut query_lines = Vec::new();
     for (row, vrow) in visible_query_rows.iter().enumerate() {
         let seg_len = vrow.display_width;
@@ -439,9 +434,9 @@ pub fn draw_panel(
                         active_query_style.clear();
                     }
                     if !token_style.is_empty() {
-                        query_parts.push(format!("{}{}{}{}", selection_bg_style, token_style, ch, RESET));
+                        query_parts.push(format!("{}{}{}{}", token_style, selection_style, ch, RESET));
                     } else {
-                        query_parts.push(format!("{}{}{}", selection_bg_style, ch, RESET));
+                        query_parts.push(format!("{}{}{}", selection_style, ch, RESET));
                     }
                     continue;
                 }
