@@ -1011,6 +1011,15 @@ impl NativeHistory {
                 let Some(candidate) = self.candidates.get(index) else {
                     return true;
                 };
+                if single_char_query
+                    && query_ascii.is_some()
+                    && !candidate.ascii
+                    && candidate
+                        .match_flex_score(&query, query_ascii.as_deref())
+                        .is_none()
+                {
+                    return true;
+                }
                 if !normalized_query.is_empty()
                     && candidate.normalized_text() == normalized_query
                 {
@@ -1029,7 +1038,8 @@ impl NativeHistory {
             let Some(candidate) = self.candidates.get(index) else {
                 return true;
             };
-            let is_single_ascii = single_char_query && query_ascii.is_some();
+            let is_single_ascii =
+                single_char_query && query_ascii.is_some() && candidate.ascii;
             let score = if is_single_ascii {
                 0
             } else {

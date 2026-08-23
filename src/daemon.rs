@@ -10,12 +10,12 @@ use crate::layout::shell_words_for_matching;
 use crate::protocol::*;
 use crate::search::{CandidateInput, NativeHistory};
 
-pub fn history_file_signature(path: &Path) -> (i64, u64) {
+pub fn history_file_signature(path: &Path) -> (i64, i64, u64) {
     if let Ok(meta) = fs::metadata(path) {
         use std::os::unix::fs::MetadataExt;
-        (meta.mtime_nsec(), meta.size())
+        (meta.mtime(), meta.mtime_nsec(), meta.size())
     } else {
-        (0, 0)
+        (0, 0, 0)
     }
 }
 

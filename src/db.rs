@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::layout::shell_words_for_matching;
@@ -72,7 +71,7 @@ pub fn ensure_custom_history_file(path: &Path) -> Result<(), rusqlite::Error> {
         let _ = fs::create_dir_all(parent);
     }
     let conn = Connection::open(path)?;
-    conn.execute_batch(
+    conn.execute(
         "
         CREATE TABLE IF NOT EXISTS custom_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,30 +80,66 @@ pub fn ensure_custom_history_file(path: &Path) -> Result<(), rusqlite::Error> {
             timestamp TEXT NOT NULL,
             failed INTEGER NOT NULL DEFAULT 0,
             status_revision INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS custom_history_metadata (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            status_revision INTEGER NOT NULL DEFAULT 0
-        );
-        INSERT OR IGNORE INTO custom_history_metadata(id, status_revision) VALUES(1, 0);
-        CREATE INDEX IF NOT EXISTS idx_custom_history_command_cwd ON custom_history(command, cwd);
-        CREATE INDEX IF NOT EXISTS idx_custom_history_id_desc ON custom_history(id DESC);
-        CREATE INDEX IF NOT EXISTS idx_custom_history_status_revision ON custom_history(status_revision);
+        )
         ",
+        [],
     )?;
 
-    // Handle possible missing columns in older schemas
     let mut stmt = conn.prepare("PRAGMA table_info(custom_history)")?;
     let cols: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))?
-        .flatten()
-        .collect();
-    if !cols.contains(&"failed".to_string()) {
-        let _ = conn.execute("ALTER TABLE custom_history ADD COLUMN failed INTEGER NOT NULL DEFAULT 0", []);
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    if !cols.iter().any(|column| column == "failed") {
+        conn.execute(
+            "ALTER TABLE custom_history ADD COLUMN failed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
-    if !cols.contains(&"status_revision".to_string()) {
-        let _ = conn.execute("ALTER TABLE custom_history ADD COLUMN status_revision INTEGER NOT NULL DEFAULT 0", []);
+    if !cols.iter().any(|column| column == "status_revision") {
+        conn.execute(
+            "ALTER TABLE custom_history ADD COLUMN status_revision INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
+
+    conn.execute(
+        "
+        CREATE TABLE IF NOT EXISTS custom_history_metadata (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            status_revision INTEGER NOT NULL DEFAULT 0
+        )
+        ",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO custom_history_metadata(id, status_revision) VALUES(1, 0)",
+        [],
+    )?;
+    conn.execute(
+        "
+        UPDATE custom_history_metadata
+        SET status_revision = MAX(
+            status_revision,
+            COALESCE((SELECT MAX(status_revision) FROM custom_history), 0)
+        )
+        WHERE id = 1
+        ",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_history_command_cwd ON custom_history(command, cwd)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_history_id_desc ON custom_history(id DESC)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_custom_history_status_revision ON custom_history(status_revision)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -230,7 +265,6 @@ pub fn update_custom_history_exit_status(
     command: &str,
     cwd: &str,
     status: i32,
-    max_age_seconds: u64,
 ) -> bool {
     let normalized_command = command.trim();
     let normalized_cwd = normalize_cwd_value(cwd);
@@ -248,26 +282,19 @@ pub fn update_custom_history_exit_status(
         Err(_) => return false,
     };
 
-    let row: Option<(i64, String)> = tx
+    let row_id: Option<i64> = tx
         .query_row(
-            "SELECT id, timestamp FROM custom_history WHERE command = ? AND cwd = ? ORDER BY id DESC LIMIT 1",
+            "SELECT id FROM custom_history WHERE command = ? AND cwd = ? ORDER BY id DESC LIMIT 1",
             params![normalized_command, normalized_cwd],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .optional()
         .unwrap_or(None);
 
-    let (row_id, timestamp_str) = match row {
-        Some(pair) => pair,
+    let row_id = match row_id {
+        Some(id) => id,
         None => return false,
     };
-
-    if let Ok(parsed_time) = DateTime::parse_from_rfc3339(&timestamp_str.replace('Z', "+00:00")) {
-        let age = Utc::now().signed_duration_since(parsed_time.with_timezone(&Utc));
-        if age.num_seconds() < 0 || age.num_seconds() > max_age_seconds as i64 {
-            return false;
-        }
-    }
 
     if status == 0 {
         return tx.commit().is_ok();
@@ -298,10 +325,11 @@ pub fn load_plain_zsh_history(path: &Path) -> Vec<CandidateInput> {
     if !path.exists() {
         return Vec::new();
     }
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
+    let raw_bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
         Err(_) => return Vec::new(),
     };
+    let raw = String::from_utf8_lossy(&raw_bytes);
     let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
     let mut entries = Vec::new();
     let mut current_extended: Option<String> = None;

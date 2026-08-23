@@ -13,7 +13,6 @@ pub mod ui;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use completion::*;
     use db::*;
     use layout::*;
@@ -185,7 +184,7 @@ mod tests {
         assert!(ensure_custom_history_file(&db_path).is_ok());
 
         let cwd = "/test/repo";
-        let timestamp = Utc::now().to_rfc3339();
+        let timestamp = "timestamp-is-not-used-for-status-updates";
         assert!(append_custom_history_entry(&db_path, "cargo check", cwd, &timestamp));
 
         let (history, watermark, rev) = build_native_custom_history_candidates(&db_path, None);
@@ -193,11 +192,142 @@ mod tests {
         assert_eq!(watermark.unwrap().command, "cargo check");
         assert_eq!(rev, 0);
 
-        assert!(update_custom_history_exit_status(&db_path, "cargo check", cwd, 1, 3600));
+        assert!(update_custom_history_exit_status(&db_path, "cargo check", cwd, 1));
         let (history2, _, rev2) = build_native_custom_history_candidates(&db_path, None);
         assert_eq!(history2.candidates[0].failed, true);
         assert_eq!(rev2, 1);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn custom_history_migration_matches_python_schema_behavior() {
+        use rusqlite::Connection;
+
+        let path = std::env::temp_dir().join(format!(
+            "zfh_schema_migration_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE custom_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                status_revision INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO custom_history(command, cwd, timestamp, status_revision)
+            VALUES('cargo test', '/repo', 'timestamp', 7);
+            ",
+        )
+        .unwrap();
+        drop(conn);
+
+        ensure_custom_history_file(&path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let columns: Vec<String> = conn
+            .prepare("PRAGMA table_info(custom_history)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "failed"));
+        assert!(columns.iter().any(|column| column == "status_revision"));
+
+        let metadata_revision: i64 = conn
+            .query_row(
+                "SELECT status_revision FROM custom_history_metadata WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata_revision, 7);
+
+        for index_name in [
+            "idx_custom_history_command_cwd",
+            "idx_custom_history_id_desc",
+            "idx_custom_history_status_revision",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    [index_name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing migrated index {index_name}");
+        }
+
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_file_signature_contains_full_modification_time() {
+        use std::os::unix::fs::MetadataExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "zfh_signature_test_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        std::fs::write(&path, b"history").unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            daemon::history_file_signature(&path),
+            (metadata.mtime(), metadata.mtime_nsec(), metadata.size())
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn plain_history_replaces_invalid_utf8_without_discarding_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "zfh_history_invalid_utf8_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        std::fs::write(&path, b"git \xffstatus\ncargo test\n").unwrap();
+
+        let entries = load_plain_zsh_history(&path);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "cargo test");
+        assert_eq!(entries[1].0, "git \u{fffd}status");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn single_ascii_query_rejects_unicode_mask_collisions() {
+        let inputs = vec![
+            make_candidate_input("café before".to_string(), None, false).unwrap(),
+            make_candidate_input("install package".to_string(), None, false).unwrap(),
+            make_candidate_input("café after".to_string(), None, false).unwrap(),
+        ];
+        let history = NativeHistory::new(inputs);
+        let query_words = vec!["i".to_string()];
+
+        let (ranked, matched_indices) = history.search_ranked(
+            "i",
+            "i",
+            &query_words,
+            &query_words,
+            None,
+            None,
+            Some(1),
+            usize::MAX,
+        );
+
+        assert_eq!(ranked, vec![(1, 0)]);
+        assert_eq!(matched_indices, Some(vec![1]));
     }
 }

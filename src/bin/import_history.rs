@@ -31,10 +31,11 @@ fn parse_mixed_zsh_history(path: &std::path::Path) -> Vec<(String, String)> {
     if !path.exists() {
         return Vec::new();
     }
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
+    let raw_bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
         Err(_) => return Vec::new(),
     };
+    let raw = String::from_utf8_lossy(&raw_bytes);
     let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
     let mut entries = Vec::new();
     let mut current_extended_command: Option<String> = None;
@@ -153,4 +154,30 @@ fn main() {
         .unwrap_or(0);
 
     println!("Imported {} entries into {} (total rows: {}).", entries.len(), target.display(), total);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_history_replaces_invalid_utf8_without_discarding_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "zfh_import_invalid_utf8_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        fs::write(&path, b"git \xffstatus\ncargo test\n").unwrap();
+
+        let entries = parse_mixed_zsh_history(&path);
+        assert_eq!(
+            entries,
+            vec![
+                ("git \u{fffd}status".to_string(), String::new()),
+                ("cargo test".to_string(), String::new()),
+            ]
+        );
+
+        let _ = fs::remove_file(path);
+    }
 }

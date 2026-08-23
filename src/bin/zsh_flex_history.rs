@@ -143,7 +143,7 @@ fn main() {
         } else {
             status_cwd
         };
-        let success = update_custom_history_exit_status(&history_path, &status_command, &cwd, status_code, 24 * 3600);
+        let success = update_custom_history_exit_status(&history_path, &status_command, &cwd, status_code);
         std::process::exit(if success { 0 } else { 1 });
     }
 

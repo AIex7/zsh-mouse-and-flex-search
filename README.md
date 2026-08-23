@@ -7,18 +7,22 @@ Use the mouse to edit commands in your terminal just like regular text, drag and
 
 ## Install and Setup
 
-Install from GitHub. This requires UV (Python) and rust:
+Install from GitHub. This requires Rust (`cargo`):
 
 ```bash
 git clone https://github.com/AIex7/zsh-mouse-and-flex-search
 cd zsh-mouse-and-flex-search
-uv tool install --editable --force .
+cargo install --path . --force
 printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
+> **Note:** Ensure `$HOME/.cargo/bin` is in your `$PATH` (e.g. `export PATH="$HOME/.cargo/bin:$PATH"` in `~/.zshrc`).
+
 Optionally, to import your existing Zsh history into the custom SQLite history database, run:
 
-`zsh-flex-history-import`
+```bash
+zsh-flex-history-import
+```
 
 ## Behavior
 
