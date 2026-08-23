@@ -176,13 +176,7 @@ pub fn run(
     } else {
         1
     };
-    let mut panel_rows = if inline_with_prompt {
-        (term_lines - anchor_row + 1).max(1)
-    } else if space_below >= 1 {
-        space_below.max(1)
-    } else {
-        (term_lines - anchor_row + 1).max(1)
-    };
+    let mut panel_rows: usize;
 
     term_write(fd, &move_to(anchor_row, anchor_col));
 

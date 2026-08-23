@@ -1,15 +1,35 @@
 [package]
-name = "zsh-flex-history-native"
+name = "zsh-flex-history"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
 
 [lib]
-name = "_flex_match"
-crate-type = ["cdylib"]
+name = "zsh_flex_history"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zsh-flex-history"
+path = "src/bin/zsh_flex_history.rs"
+
+[[bin]]
+name = "zsh-flex-history-init-zsh"
+path = "src/bin/init_zsh.rs"
+
+[[bin]]
+name = "zsh-flex-history-import"
+path = "src/bin/import_history.rs"
 
 [dependencies]
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+libc = "0.2"
+rusqlite = { version = "0.33", features = ["bundled"] }
+unicode-width = "0.2"
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"], optional = true }
+
+[features]
+default = []
+python = ["dep:pyo3"]
 
 [profile.release]
 opt-level = 3
