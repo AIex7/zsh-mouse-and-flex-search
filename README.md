@@ -46,6 +46,9 @@ Optionally, to import your existing Zsh history into the custom SQLite history d
   - Sets the ANSI background color of the visual cursor.
   - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`, plus `#RRGGBB` values such as `#ff0000`.
   - Defaults to the terminal detected cursor.
+- `ZSH_FLEX_HISTORY_MAX_RETURNED_RESULTS`
+  - Sets the maximum number of history results returned by each search.
+  - Must be a positive integer. Defaults to `100` when unset or invalid.
     
 ## Keys
 

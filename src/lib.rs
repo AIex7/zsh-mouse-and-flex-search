@@ -28,6 +28,7 @@ const FRAME_PONG_RESPONSE: u8 = 0x82;
 const FRAME_ERROR_RESPONSE: u8 = 0xff;
 const MAX_DAEMON_QUERY_CACHE_ENTRIES: usize = 64;
 const MAX_DAEMON_QUERY_CACHE_INDICES: usize = 1_000_000;
+const RANKING_BUCKET_OVERSCAN_FACTOR: usize = 2;
 
 fn is_python_whitespace(character: char) -> bool {
     character.is_whitespace() || matches!(character, '\u{1c}'..='\u{1f}')
@@ -1542,7 +1543,10 @@ impl NativeHistory {
         } else {
             None
         };
-        let bounded_single_ascii_query = single_ascii_prefix_byte.is_some() && result_limit == 100;
+        let bounded_single_ascii_query = single_ascii_prefix_byte.is_some() && limit.is_some();
+        let bucket_limit = result_limit
+            .saturating_mul(RANKING_BUCKET_OVERSCAN_FACTOR)
+            .min(self.candidates.len());
 
         py.allow_threads(|| {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
@@ -1613,9 +1617,9 @@ impl NativeHistory {
                         });
                     }
                     let bucket = &mut buckets_by_prefix[prefix_word_count][inner_bucket];
-                    if bucket.len() < 200 {
+                    if bucket.len() < bucket_limit {
                         if bucket.capacity() == 0 {
-                            bucket.reserve_exact(200);
+                            bucket.reserve_exact(bucket_limit);
                         }
                         bucket.push(RankedMatch {
                             index,
@@ -1719,7 +1723,7 @@ impl NativeHistory {
                         std::array::from_fn(|_| Vec::new())
                     });
                 }
-                if buckets_by_prefix[prefix_word_count][inner_bucket].len() < result_limit * 2 {
+                if buckets_by_prefix[prefix_word_count][inner_bucket].len() < bucket_limit {
                     buckets_by_prefix[prefix_word_count][inner_bucket].push(RankedMatch {
                         index,
                         score,

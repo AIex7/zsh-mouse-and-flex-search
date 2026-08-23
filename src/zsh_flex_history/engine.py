@@ -185,6 +185,15 @@ def color_value_from_env(name: str) -> tuple[Optional[int], Optional[str]]:
     return ansi_color_from_env(name, None), None
 
 
+def positive_int_from_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def hex_to_rgb(value: str) -> tuple[int, int, int]:
     value = value.lstrip("#")
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
@@ -248,7 +257,12 @@ ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 ENABLE_KITTY_KEYBOARD = "\x1b[>1u"
 DISABLE_KITTY_KEYBOARD = "\x1b[<u"
-MAX_RETURNED_RESULTS = 100
+MAX_RETURNED_RESULTS_ENV = "ZSH_FLEX_HISTORY_MAX_RETURNED_RESULTS"
+DEFAULT_MAX_RETURNED_RESULTS = 100
+MAX_RETURNED_RESULTS = positive_int_from_env(
+    MAX_RETURNED_RESULTS_ENV,
+    DEFAULT_MAX_RETURNED_RESULTS,
+)
 MAX_CACHED_CANDIDATE_INDICES = 10_000
 FIXED_MATCH_TEXT_WIDTH = 3000
 RESULT_PREFIX_WIDTH = 2
