@@ -21,15 +21,9 @@ name = "zsh-flex-history-import"
 path = "src/bin/import_history.rs"
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"
 rusqlite = { version = "0.33", features = ["bundled"] }
 unicode-width = "0.2"
-pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"], optional = true }
-
-[features]
-default = []
-python = ["dep:pyo3"]
 
 [profile.release]
 opt-level = 3

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
-use chrono::Utc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use zsh_flex_history::daemon::{run_history_daemon, HistoryDaemonClient};
 use zsh_flex_history::db::*;
@@ -190,7 +190,11 @@ fn main() {
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            append_custom_history_entry(&history_path, &cleaned, &cwd, &Utc::now().to_rfc3339());
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs().to_string())
+                .unwrap_or_default();
+            append_custom_history_entry(&history_path, &cleaned, &cwd, &timestamp);
         }
 
         if print_only {

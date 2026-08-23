@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::PathBuf;
-use chrono::DateTime;
 use rusqlite::Connection;
 
 use zsh_flex_history::db::{default_custom_history_path, ensure_custom_history_file};
@@ -18,13 +17,11 @@ fn default_input_history_path() -> PathBuf {
     }
 }
 
-fn epoch_to_iso(epoch_str: &str) -> String {
-    if let Ok(epoch) = epoch_str.parse::<i64>() {
-        if let Some(dt) = DateTime::from_timestamp(epoch, 0) {
-            return dt.to_rfc3339();
-        }
-    }
-    String::new()
+fn normalize_epoch_timestamp(epoch_str: &str) -> String {
+    epoch_str
+        .parse::<i64>()
+        .map(|epoch| epoch.to_string())
+        .unwrap_or_default()
 }
 
 fn parse_mixed_zsh_history(path: &std::path::Path) -> Vec<(String, String)> {
@@ -58,7 +55,7 @@ fn parse_mixed_zsh_history(path: &std::path::Path) -> Vec<(String, String)> {
                 let meta = &line[2..semi_pos];
                 let epoch = meta.split(':').next().unwrap_or("");
                 flush_extended(&mut current_extended_command, &mut current_extended_timestamp, &mut entries);
-                current_extended_timestamp = epoch_to_iso(epoch);
+                current_extended_timestamp = normalize_epoch_timestamp(epoch);
                 current_extended_command = Some(line[semi_pos + 1..].to_string());
                 continue;
             }
