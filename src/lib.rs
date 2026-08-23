@@ -1542,6 +1542,7 @@ impl NativeHistory {
         } else {
             None
         };
+        let bounded_single_ascii_query = single_ascii_prefix_byte.is_some() && result_limit == 100;
 
         py.allow_threads(|| {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
@@ -1592,6 +1593,55 @@ impl NativeHistory {
                     } else {
                         matched_indices = None;
                     }
+                }
+
+                if bounded_single_ascii_query {
+                    let prefix_word_count = usize::from(
+                        candidate.text_lower().as_bytes().first().copied()
+                            == single_ascii_prefix_byte,
+                    );
+                    let same_cwd = current_cwd.as_ref().is_some_and(|cwd| {
+                        candidate
+                            .cwd
+                            .as_ref()
+                            .is_some_and(|candidate_cwd| Arc::ptr_eq(candidate_cwd, cwd))
+                    });
+                    let inner_bucket = if same_cwd { 0 } else { 1 };
+                    if buckets_by_prefix.len() <= prefix_word_count {
+                        buckets_by_prefix.resize_with(prefix_word_count + 1, || {
+                            std::array::from_fn(|_| Vec::new())
+                        });
+                    }
+                    let bucket = &mut buckets_by_prefix[prefix_word_count][inner_bucket];
+                    if bucket.len() < 200 {
+                        if bucket.capacity() == 0 {
+                            bucket.reserve_exact(200);
+                        }
+                        bucket.push(RankedMatch {
+                            index,
+                            score,
+                            scan_order,
+                        });
+                    }
+
+                    if prefix_word_count == 1 {
+                        if current_cwd.is_none() {
+                            if seen_preferred.insert(candidate.text.as_str()) {
+                                preferred_collected += 1;
+                                if preferred_collected >= result_limit {
+                                    ranking_completed = true;
+                                }
+                            }
+                        } else if inner_bucket == 0
+                            && seen_preferred.insert(candidate.text.as_str())
+                        {
+                            preferred_collected += 1;
+                            if preferred_collected >= result_limit {
+                                ranking_completed = true;
+                            }
+                        }
+                    }
+                    return true;
                 }
 
                 let prefix_word_count = if let Some(prefix_byte) = single_ascii_prefix_byte {
