@@ -1,14 +1,85 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use rusqlite::OptionalExtension;
 
 use crate::db::*;
 use crate::layout::shell_words_for_matching;
 use crate::protocol::*;
 use crate::search::{CandidateInput, NativeHistory};
+
+type CustomHistoryRefreshRow = (i64, String, String, String, i64);
+
+pub(crate) struct CustomHistoryRefreshSnapshot {
+    pub(crate) rows: Vec<CustomHistoryRefreshRow>,
+    pub(crate) status_rows: Vec<(i64, usize)>,
+    pub(crate) revision: Option<i64>,
+}
+
+pub(crate) fn read_custom_history_refresh_snapshot_with_hook<F>(
+    conn: &mut rusqlite::Connection,
+    watermark_row_id: i64,
+    status_revision: i64,
+    after_rows_read: F,
+) -> Result<CustomHistoryRefreshSnapshot, rusqlite::Error>
+where
+    F: FnOnce(),
+{
+    let tx = conn.transaction()?;
+
+    let rows = {
+        let mut stmt = tx.prepare(
+            "SELECT id, command, cwd, timestamp, failed FROM custom_history WHERE id >= ? ORDER BY id DESC",
+        )?;
+        let mapped = stmt.query_map([watermark_row_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2).unwrap_or_default(),
+                row.get(3).unwrap_or_default(),
+                row.get(4).unwrap_or(0),
+            ))
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+
+    // Tests use this hook to commit a concurrent writer after SQLite has fixed
+    // the read snapshot. Production passes a no-op closure.
+    after_rows_read();
+
+    let status_rows = {
+        let mut stmt = tx.prepare(
+            "SELECT h.failed, (SELECT COUNT(*) FROM custom_history AS newer WHERE newer.id > h.id)
+             FROM custom_history AS h
+             WHERE h.status_revision > ?
+             ORDER BY h.status_revision",
+        )?;
+        let mapped = stmt.query_map([status_revision], |row| {
+            Ok((row.get(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let revision = tx
+        .query_row(
+            "SELECT status_revision FROM custom_history_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    tx.commit()?;
+    Ok(CustomHistoryRefreshSnapshot {
+        rows,
+        status_rows,
+        revision,
+    })
+}
 
 pub fn history_file_signature(path: &Path) -> (i64, i64, u64) {
     if let Ok(meta) = fs::metadata(path) {
@@ -103,7 +174,7 @@ impl DaemonHistoryState {
             }
         };
 
-        let conn = match rusqlite::Connection::open(&self.path) {
+        let mut conn = match rusqlite::Connection::open(&self.path) {
             Ok(c) => c,
             Err(_) => {
                 self.rebuild_native();
@@ -111,55 +182,19 @@ impl DaemonHistoryState {
             }
         };
 
-        let rows_res: Result<Vec<(i64, String, String, String, i64)>, rusqlite::Error> = (|| {
-            let mut stmt = conn.prepare(
-                "SELECT id, command, cwd, timestamp, failed FROM custom_history WHERE id >= ? ORDER BY id DESC",
-            )?;
-            let mapped = stmt.query_map([watermark.row_id], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2).unwrap_or_default(),
-                    row.get(3).unwrap_or_default(),
-                    row.get(4).unwrap_or(0),
-                ))
-            })?;
-            let mut res = Vec::new();
-            for r in mapped.flatten() {
-                res.push(r);
-            }
-            Ok(res)
-        })();
-
-        let rows = match rows_res {
-            Ok(r) => r,
+        let snapshot = match read_custom_history_refresh_snapshot_with_hook(
+            &mut conn,
+            watermark.row_id,
+            self.custom_history_status_revision,
+            || {},
+        ) {
+            Ok(snapshot) => snapshot,
             Err(_) => {
                 self.rebuild_native();
                 return;
             }
         };
-
-        let status_rows_res: Result<Vec<(i64, usize)>, rusqlite::Error> = (|| {
-            let mut stmt = conn.prepare(
-                "SELECT h.failed, (SELECT COUNT(*) FROM custom_history AS newer WHERE newer.id > h.id)
-                 FROM custom_history AS h
-                 WHERE h.status_revision > ?
-                 ORDER BY h.status_revision",
-            )?;
-            let mapped = stmt.query_map([self.custom_history_status_revision], |row| {
-                Ok((row.get(0)?, row.get::<_, i64>(1)? as usize))
-            })?;
-            let mut res = Vec::new();
-            for r in mapped.flatten() {
-                res.push(r);
-            }
-            Ok(res)
-        })();
-
-        let status_rows = status_rows_res.unwrap_or_default();
-        let revision_row: Option<i64> = conn
-            .query_row("SELECT status_revision FROM custom_history_metadata WHERE id = 1", [], |r| r.get(0))
-            .ok();
+        let rows = snapshot.rows;
 
         let mut anchor = None;
         let mut watermark_replaced = false;
@@ -196,7 +231,7 @@ impl DaemonHistoryState {
             }
         }
 
-        for (failed, candidate_index) in status_rows {
+        for (failed, candidate_index) in snapshot.status_rows {
             if let Some(limit) = self.history_length {
                 if candidate_index >= limit {
                     continue;
@@ -213,7 +248,7 @@ impl DaemonHistoryState {
                 timestamp: if first_rec.3.is_empty() { None } else { Some(first_rec.3.clone()) },
             });
         }
-        if let Some(rev) = revision_row {
+        if let Some(rev) = snapshot.revision {
             self.custom_history_status_revision = rev;
         }
     }
@@ -354,8 +389,23 @@ pub fn launch_history_daemon(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    detach_daemon_process(&mut cmd);
 
     cmd.spawn().is_ok()
+}
+
+pub(crate) fn detach_daemon_process(cmd: &mut Command) {
+    // SAFETY: setsid is async-signal-safe and the closure does not allocate or
+    // access shared state between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
 }
 
 pub fn run_history_daemon(

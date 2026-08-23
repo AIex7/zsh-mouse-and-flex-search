@@ -290,6 +290,118 @@ mod tests {
     }
 
     #[test]
+    fn daemon_custom_history_refresh_reads_one_sqlite_snapshot() {
+        use rusqlite::Connection;
+
+        let path = std::env::temp_dir().join(format!(
+            "zfh_refresh_snapshot_{}_{}.db",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = std::fs::remove_file(&path);
+        ensure_custom_history_file(&path).unwrap();
+        assert!(append_custom_history_entry(
+            &path,
+            "first command",
+            "/repo",
+            "first timestamp"
+        ));
+
+        let mut reader = Connection::open(&path).unwrap();
+        reader
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+
+        let first_snapshot = daemon::read_custom_history_refresh_snapshot_with_hook(
+            &mut reader,
+            1,
+            0,
+            || {
+                let writer = Connection::open(&path).unwrap();
+                writer
+                    .execute_batch(
+                        "
+                        BEGIN IMMEDIATE;
+                        INSERT INTO custom_history(
+                            command, cwd, timestamp, failed, status_revision
+                        ) VALUES('concurrent command', '/repo', 'second timestamp', 1, 1);
+                        UPDATE custom_history_metadata SET status_revision = 1 WHERE id = 1;
+                        COMMIT;
+                        ",
+                    )
+                    .unwrap();
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first_snapshot.rows.len(), 1);
+        assert_eq!(first_snapshot.rows[0].1, "first command");
+        assert!(first_snapshot.status_rows.is_empty());
+        assert_eq!(first_snapshot.revision, Some(0));
+
+        let next_snapshot = daemon::read_custom_history_refresh_snapshot_with_hook(
+            &mut reader,
+            1,
+            0,
+            || {},
+        )
+        .unwrap();
+        assert_eq!(next_snapshot.rows.len(), 2);
+        assert_eq!(next_snapshot.status_rows, vec![(1, 0)]);
+        assert_eq!(next_snapshot.revision, Some(1));
+
+        drop(reader);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn spawned_daemon_process_starts_a_new_session() {
+        use std::io::Read;
+        use std::os::fd::FromRawFd;
+        use std::os::unix::process::CommandExt;
+        use std::process::Command;
+
+        let parent_session = unsafe { libc::getsid(0) };
+        assert_ne!(parent_session, -1);
+
+        let mut pipe_fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let read_fd = pipe_fds[0];
+        let write_fd = pipe_fds[1];
+
+        let mut command = Command::new("/usr/bin/true");
+        daemon::detach_daemon_process(&mut command);
+        unsafe {
+            command.pre_exec(move || {
+                let child_session = libc::getsid(0);
+                let bytes = child_session.to_ne_bytes();
+                let written = libc::write(
+                    write_fd,
+                    bytes.as_ptr().cast::<libc::c_void>(),
+                    bytes.len(),
+                );
+                libc::close(write_fd);
+                if written == bytes.len() as isize {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+
+        let mut child = command.spawn().unwrap();
+        unsafe { libc::close(write_fd) };
+
+        let mut session_bytes = [0_u8; std::mem::size_of::<libc::pid_t>()];
+        let mut pipe_reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
+        pipe_reader.read_exact(&mut session_bytes).unwrap();
+        assert!(child.wait().unwrap().success());
+
+        let child_session = libc::pid_t::from_ne_bytes(session_bytes);
+        assert_ne!(child_session, parent_session);
+    }
+
+    #[test]
     fn plain_history_replaces_invalid_utf8_without_discarding_entries() {
         let path = std::env::temp_dir().join(format!(
             "zfh_history_invalid_utf8_{}_{}",
