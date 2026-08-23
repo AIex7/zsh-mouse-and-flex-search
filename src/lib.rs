@@ -176,6 +176,57 @@ mod tests {
     }
 
     #[test]
+    fn runtime_path_completions_rank_prefix_order_and_length() {
+        let entries = vec![
+            DirectoryListingEntry { name: "old_music".to_string(), is_dir: false },
+            DirectoryListingEntry { name: "music_manifest".to_string(), is_dir: false },
+            DirectoryListingEntry { name: "music".to_string(), is_dir: true },
+            DirectoryListingEntry { name: "music folder".to_string(), is_dir: true },
+        ];
+
+        let ranked = top_ranked_directory_entries("music", &entries);
+        assert_eq!(
+            ranked.into_iter().map(|entry| entry.name).collect::<Vec<_>>(),
+            vec!["music", "music folder", "music_manifest", "old_music"]
+        );
+
+        let multiword_entries = vec![
+            DirectoryListingEntry { name: "archive music folder".to_string(), is_dir: true },
+            DirectoryListingEntry { name: "museum_file_old".to_string(), is_dir: false },
+            DirectoryListingEntry { name: "music folder".to_string(), is_dir: true },
+        ];
+        let ranked = top_ranked_directory_entries("mu fol", &multiword_entries);
+        assert_eq!(
+            ranked.into_iter().map(|entry| entry.name).collect::<Vec<_>>(),
+            vec!["music folder", "archive music folder", "museum_file_old"]
+        );
+    }
+
+    #[test]
+    fn featured_runtime_completion_moves_matching_history_result_to_the_top() {
+        let result = |text: &str, runtime_completion: bool| render::MatchResult {
+            text: text.to_string(),
+            score: 0,
+            exact: false,
+            recency: 0,
+            cwd: None,
+            text_lower: None,
+            runtime_completion,
+            failed: false,
+            words: Vec::new(),
+        };
+        let history = vec![result("other history", false), result("/repo/music", false)];
+        let runtime = vec![result("/repo/music", true), result("/repo/music_manifest", true)];
+
+        let merged = insert_runtime_completions(history, runtime, 1);
+        assert_eq!(
+            merged.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(),
+            vec!["/repo/music", "other history", "/repo/music_manifest"]
+        );
+        assert!(merged[0].runtime_completion);
+    }
+
+    #[test]
     fn sqlite_custom_history_lifecycle() {
         let temp_dir = std::env::temp_dir().join(format!("zfh_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);

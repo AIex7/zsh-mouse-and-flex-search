@@ -74,17 +74,51 @@ pub fn top_ranked_directory_entries(
 ) -> Vec<DirectoryListingEntry> {
     let query_lower = query.to_lowercase();
     let query_chars: Vec<char> = query_lower.chars().filter(|c| !c.is_whitespace()).collect();
+    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
     let mut ranked = Vec::new();
 
     for entry in entries {
         let entry_lower = entry.name.to_lowercase();
         if let Some(score) = match_flex(&query_chars, &entry.name, &entry_lower) {
-            ranked.push((entry.clone(), score));
+            let entry_words: Vec<&str> = entry_lower.split_whitespace().collect();
+            let prefix_match = !query_words.is_empty()
+                && query_words.len() <= entry_words.len()
+                && query_words
+                    .iter()
+                    .zip(&entry_words)
+                    .all(|(query_word, entry_word)| entry_word.starts_with(query_word));
+            let words_in_order = query_words.len() > 1 && {
+                let mut remaining = entry_lower.as_str();
+                query_words.iter().all(|query_word| {
+                    let Some(position) = remaining.find(query_word) else {
+                        return false;
+                    };
+                    remaining = &remaining[position + query_word.len()..];
+                    true
+                })
+            };
+            let rank_group = if prefix_match {
+                0
+            } else if words_in_order {
+                1
+            } else {
+                2
+            };
+            ranked.push((entry.clone(), score, rank_group, entry_lower.chars().count(), entry_lower));
         }
     }
 
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
-    ranked.into_iter().map(|(entry, _)| entry).collect()
+    ranked.sort_by(|a, b| {
+        a.2.cmp(&b.2)
+            .then_with(|| a.3.cmp(&b.3))
+            .then_with(|| a.4.cmp(&b.4))
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.0.name.cmp(&b.0.name))
+    });
+    ranked
+        .into_iter()
+        .map(|(entry, _, _, _, _)| entry)
+        .collect()
 }
 
 pub const PATH_COMPLETION_ENV_VARS: [&str; 8] = [
@@ -309,11 +343,17 @@ pub fn insert_runtime_completions(
     let mut merged_texts: HashSet<String> = merged.iter().map(|item| item.text.clone()).collect();
     let mut insertion_index = 0;
     for runtime_completion in runtime_completions.iter().take(featured_count) {
-        if merged_texts.contains(&runtime_completion.text) {
-            continue;
+        if let Some(existing_index) = merged
+            .iter()
+            .position(|item| item.text == runtime_completion.text)
+        {
+            let mut existing = merged.remove(existing_index);
+            existing.runtime_completion = true;
+            merged.insert(insertion_index, existing);
+        } else {
+            merged.insert(insertion_index, runtime_completion.clone());
+            merged_texts.insert(runtime_completion.text.clone());
         }
-        merged.insert(insertion_index, runtime_completion.clone());
-        merged_texts.insert(runtime_completion.text.clone());
         insertion_index += 1;
     }
     for runtime_completion in runtime_completions.iter().skip(featured_count) {
