@@ -77,7 +77,7 @@ def benchmark_search(
     history: list[HistoryEntry],
     native_candidates: Any,
 ) -> tuple[list[object], object]:
-    results, matched_indices, _ = search_history_ranked_native(
+    results, matched_indices = search_history_ranked_native(
         query,
         history,
         native_candidates,

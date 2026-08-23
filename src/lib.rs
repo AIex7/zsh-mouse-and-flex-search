@@ -19,7 +19,7 @@ use std::arch::x86_64::*;
 mod syntax_highlighting;
 
 const MAX_DAEMON_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
-const FRAME_MAGIC: [u8; 4] = *b"ZFH\x01";
+const FRAME_MAGIC: [u8; 4] = *b"ZFH\x02";
 const FRAME_HEADER_BYTES: usize = 8;
 const FRAME_PING_REQUEST: u8 = 1;
 const FRAME_SEARCH_REQUEST: u8 = 2;
@@ -261,14 +261,14 @@ fn scan_char_masks(
     base_offset: usize,
     query_mask: u128,
     mut on_match: impl FnMut(usize) -> bool,
-) {
+) -> bool {
     if query_mask == 0 {
         for i in 0..slice.len() {
             if !on_match(base_offset + i) {
-                break;
+                return false;
             }
         }
-        return;
+        return true;
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -278,7 +278,6 @@ fn scan_char_masks(
         let chunks = slice.chunks_exact(4);
         let remainder = chunks.remainder();
         let mut base = base_offset;
-        let mut keep_matching = true;
 
         for chunk in chunks {
             let ptr = chunk.as_ptr();
@@ -292,32 +291,17 @@ fn scan_char_masks(
             let c2 = vceqq_u8(vandq_u8(m2, q_vec), q_vec);
             let c3 = vceqq_u8(vandq_u8(m3, q_vec), q_vec);
 
-            if keep_matching {
-                if vminvq_u8(c0) == 0xFF && !on_match(base) {
-                    keep_matching = false;
-                }
-                if keep_matching && vminvq_u8(c1) == 0xFF && !on_match(base + 1) {
-                    keep_matching = false;
-                }
-                if keep_matching && vminvq_u8(c2) == 0xFF && !on_match(base + 2) {
-                    keep_matching = false;
-                }
-                if keep_matching && vminvq_u8(c3) == 0xFF && !on_match(base + 3) {
-                    keep_matching = false;
-                }
-            } else {
-                if vminvq_u8(c0) == 0xFF {
-                    let _ = on_match(base);
-                }
-                if vminvq_u8(c1) == 0xFF {
-                    let _ = on_match(base + 1);
-                }
-                if vminvq_u8(c2) == 0xFF {
-                    let _ = on_match(base + 2);
-                }
-                if vminvq_u8(c3) == 0xFF {
-                    let _ = on_match(base + 3);
-                }
+            if vminvq_u8(c0) == 0xFF && !on_match(base) {
+                return false;
+            }
+            if vminvq_u8(c1) == 0xFF && !on_match(base + 1) {
+                return false;
+            }
+            if vminvq_u8(c2) == 0xFF && !on_match(base + 2) {
+                return false;
+            }
+            if vminvq_u8(c3) == 0xFF && !on_match(base + 3) {
+                return false;
             }
             base += 4;
         }
@@ -326,10 +310,11 @@ fn scan_char_masks(
             let m = vld1q_u8((&mask as *const u128) as *const u8);
             let c = vceqq_u8(vandq_u8(m, q_vec), q_vec);
             if vminvq_u8(c) == 0xFF && !on_match(base) {
-                // finished
+                return false;
             }
             base += 1;
         }
+        true
     }
 
     #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
@@ -339,7 +324,6 @@ fn scan_char_masks(
         let chunks = slice.chunks_exact(4);
         let remainder = chunks.remainder();
         let mut base = base_offset;
-        let mut keep_matching = true;
 
         for chunk in chunks {
             let ptr = chunk.as_ptr() as *const __m128i;
@@ -348,32 +332,17 @@ fn scan_char_masks(
             let m2 = _mm_loadu_si128(ptr.add(2));
             let m3 = _mm_loadu_si128(ptr.add(3));
 
-            if keep_matching {
-                if _mm_testc_si128(m0, q_vec) != 0 && !on_match(base) {
-                    keep_matching = false;
-                }
-                if keep_matching && _mm_testc_si128(m1, q_vec) != 0 && !on_match(base + 1) {
-                    keep_matching = false;
-                }
-                if keep_matching && _mm_testc_si128(m2, q_vec) != 0 && !on_match(base + 2) {
-                    keep_matching = false;
-                }
-                if keep_matching && _mm_testc_si128(m3, q_vec) != 0 && !on_match(base + 3) {
-                    keep_matching = false;
-                }
-            } else {
-                if _mm_testc_si128(m0, q_vec) != 0 {
-                    let _ = on_match(base);
-                }
-                if _mm_testc_si128(m1, q_vec) != 0 {
-                    let _ = on_match(base + 1);
-                }
-                if _mm_testc_si128(m2, q_vec) != 0 {
-                    let _ = on_match(base + 2);
-                }
-                if _mm_testc_si128(m3, q_vec) != 0 {
-                    let _ = on_match(base + 3);
-                }
+            if _mm_testc_si128(m0, q_vec) != 0 && !on_match(base) {
+                return false;
+            }
+            if _mm_testc_si128(m1, q_vec) != 0 && !on_match(base + 1) {
+                return false;
+            }
+            if _mm_testc_si128(m2, q_vec) != 0 && !on_match(base + 2) {
+                return false;
+            }
+            if _mm_testc_si128(m3, q_vec) != 0 && !on_match(base + 3) {
+                return false;
             }
             base += 4;
         }
@@ -381,19 +350,21 @@ fn scan_char_masks(
         for &mask in remainder {
             let m = _mm_loadu_si128((&mask as *const u128) as *const __m128i);
             if _mm_testc_si128(m, q_vec) != 0 && !on_match(base) {
-                // finished
+                return false;
             }
             base += 1;
         }
+        true
     }
 
     #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", target_feature = "sse4.1"))))]
     {
         for (i, &mask) in slice.iter().enumerate() {
             if (mask & query_mask) == query_mask && !on_match(base_offset + i) {
-                // finished
+                return false;
             }
         }
+        true
     }
 }
 
@@ -749,7 +720,7 @@ struct RankedMatch {
 }
 
 type ParsedResult = (String, i64, bool, i64, Option<String>, bool, Vec<String>);
-type ParsedResponse = (Vec<ParsedResult>, Option<Vec<usize>>, usize);
+type ParsedResponse = (Vec<ParsedResult>, Option<Vec<usize>>);
 
 struct FrameWriter {
     payload: Vec<u8>,
@@ -887,7 +858,6 @@ impl<'a> FrameReader<'a> {
 
 fn parse_search_response_bytes(raw: &[u8]) -> Option<ParsedResponse> {
     let mut reader = FrameReader::new(raw, FRAME_SEARCH_RESPONSE)?;
-    let matched_count = reader.u64()?;
     let matched_indices = if reader.bool()? {
         let count = reader.u32()?;
         if count > reader.remaining() / 8 {
@@ -923,7 +893,7 @@ fn parse_search_response_bytes(raw: &[u8]) -> Option<ParsedResponse> {
         }
         results.push((text, score, exact, recency, cwd, failed, words));
     }
-    reader.done().then_some((results, matched_indices, matched_count))
+    reader.done().then_some((results, matched_indices))
 }
 
 fn serialize_search_request_bytes(
@@ -1195,10 +1165,8 @@ impl NativeHistory {
         &self,
         selected: &[(usize, i64)],
         matched_indices: Option<&[usize]>,
-        matched_count: usize,
     ) -> Result<Vec<u8>, &'static str> {
         let mut writer = FrameWriter::new(FRAME_SEARCH_RESPONSE);
-        writer.u64(matched_count)?;
         writer.byte(u8::from(matched_indices.is_some()));
         if let Some(indices) = matched_indices {
             writer.u32(indices.len())?;
@@ -1230,15 +1198,11 @@ impl NativeHistory {
         candidate_indices: Option<&[usize]>,
         limit: Option<usize>,
         current_cwd: Option<&Arc<str>>,
-    ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
-        let matched_count = candidate_indices.map_or(self.candidates.len(), |indices| {
-            indices
-                .iter()
-                .filter(|&&index| index < self.candidates.len())
-                .count()
-        });
+    ) -> (Vec<(usize, i64)>, Option<Vec<usize>>) {
         let result_limit = limit.unwrap_or(usize::MAX);
-        let capacity = result_limit.min(matched_count);
+        let capacity = result_limit.min(
+            candidate_indices.map_or(self.candidates.len(), |indices| indices.len()),
+        );
         let mut selected = Vec::with_capacity(capacity);
         let mut seen = HashSet::with_capacity(capacity);
 
@@ -1285,7 +1249,7 @@ impl NativeHistory {
         } else {
             collect_pass(None);
         }
-        (selected, None, matched_count)
+        (selected, None)
     }
 }
 
@@ -1539,7 +1503,7 @@ impl NativeHistory {
         candidate_indices: Option<Vec<usize>>,
         limit: Option<usize>,
         max_returned_indices: usize,
-    ) -> (Vec<(usize, i64)>, Option<Vec<usize>>, usize) {
+    ) -> (Vec<(usize, i64)>, Option<Vec<usize>>) {
         let current_cwd = current_cwd
             .as_deref()
             .and_then(|cwd| self.cwd_interner.get(cwd).cloned());
@@ -1582,22 +1546,27 @@ impl NativeHistory {
         py.allow_threads(|| {
             let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
             let mut matched_indices = Some(Vec::new());
-            let mut matched_count = 0;
             let mut preferred_collected = 0;
-            let mut scoring_completed = false;
+            let mut ranking_completed = false;
             let mut seen_preferred = HashSet::new();
 
             let mut check_candidate = |scan_order: usize, index: usize| -> bool {
-                if scoring_completed {
-                    matched_count += 1;
+                if ranking_completed {
+                    let Some(candidate) = self.candidates.get(index) else {
+                        return true;
+                    };
+                    if !normalized_query.is_empty()
+                        && candidate.normalized_text() == normalized_query
+                    {
+                        return true;
+                    }
                     if let Some(indices) = matched_indices.as_mut() {
                         if indices.len() < max_returned_indices {
                             indices.push(index);
                             return true;
-                        } else {
-                            matched_indices = None;
                         }
                     }
+                    matched_indices = None;
                     return false;
                 }
 
@@ -1617,7 +1586,6 @@ impl NativeHistory {
                     return true;
                 }
 
-                matched_count += 1;
                 if let Some(indices) = matched_indices.as_mut() {
                     if indices.len() < max_returned_indices {
                         indices.push(index);
@@ -1714,14 +1682,14 @@ impl NativeHistory {
                         if seen_preferred.insert(candidate.text.as_str()) {
                             preferred_collected += 1;
                             if preferred_collected >= result_limit {
-                                scoring_completed = true;
+                                ranking_completed = true;
                             }
                         }
                     } else if inner_bucket == 0 {
                         if seen_preferred.insert(candidate.text.as_str()) {
                             preferred_collected += 1;
                             if preferred_collected >= result_limit {
-                                scoring_completed = true;
+                                ranking_completed = true;
                             }
                         }
                     }
@@ -1743,16 +1711,18 @@ impl NativeHistory {
                 }
             } else {
                 let (slice1, slice2) = self.char_masks.as_slices();
-                scan_char_masks(slice1, 0, query_mask, |index| {
+                let completed_first = scan_char_masks(slice1, 0, query_mask, |index| {
                     check_candidate(index, index)
                 });
-                scan_char_masks(slice2, slice1.len(), query_mask, |index| {
-                    check_candidate(index, index)
-                });
+                if completed_first {
+                    scan_char_masks(slice2, slice1.len(), query_mask, |index| {
+                        check_candidate(index, index)
+                    });
+                }
             }
 
             let result_limit = limit.unwrap_or(usize::MAX);
-            let mut selected = Vec::with_capacity(result_limit.min(matched_count));
+            let mut selected = Vec::with_capacity(result_limit.min(self.candidates.len()));
             let mut seen = HashSet::new();
             let mut select_match = |matched: &RankedMatch| -> bool {
                 let text = self.candidates[matched.index].text.as_str();
@@ -1808,7 +1778,7 @@ impl NativeHistory {
                     }
                 }
             }
-            (selected, matched_indices, matched_count)
+            (selected, matched_indices)
         })
     }
 
@@ -1825,7 +1795,7 @@ impl NativeHistory {
         limit: Option<usize>,
         max_returned_indices: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let (selected, matched_indices, matched_count) = self.search_ranked(
+        let (selected, matched_indices) = self.search_ranked(
             py,
             query_lower,
             normalized_query,
@@ -1837,7 +1807,7 @@ impl NativeHistory {
             max_returned_indices,
         );
         let frame = self
-            .serialize_ranked_response(&selected, matched_indices.as_deref(), matched_count)
+            .serialize_ranked_response(&selected, matched_indices.as_deref())
             .map_err(PyValueError::new_err)?;
         Ok(PyBytes::new(py, &frame))
     }
@@ -1865,7 +1835,7 @@ impl NativeHistory {
         } else {
             None
         };
-        let (selected, matched_indices, matched_count) = self.search_ranked(
+        let (selected, matched_indices) = self.search_ranked(
             py,
             query_lower,
             normalized_query,
@@ -1885,7 +1855,7 @@ impl NativeHistory {
             }
         }
         let frame = self
-            .serialize_ranked_response(&selected, None, matched_count)
+            .serialize_ranked_response(&selected, None)
             .map_err(PyValueError::new_err)?;
         Ok(PyBytes::new(py, &frame))
     }
@@ -2002,7 +1972,6 @@ mod tests {
     #[test]
     fn binary_search_response_round_trips() {
         let mut writer = FrameWriter::new(FRAME_SEARCH_RESPONSE);
-        writer.u64(2).unwrap();
         writer.byte(1);
         writer.u32(2).unwrap();
         writer.u64(3).unwrap();
@@ -2032,7 +2001,6 @@ mod tests {
                     vec!["git".to_owned(), "status".to_owned(), "--short".to_owned()],
                 )],
                 Some(vec![3, 8]),
-                2,
             ))
         );
     }
@@ -2040,7 +2008,6 @@ mod tests {
     #[test]
     fn binary_response_parser_rejects_truncation_and_trailing_bytes() {
         let mut frame = FrameWriter::new(FRAME_SEARCH_RESPONSE);
-        frame.u64(0).unwrap();
         frame.byte(0);
         frame.u32(0).unwrap();
         let frame = frame.finish().unwrap();

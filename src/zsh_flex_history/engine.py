@@ -1493,12 +1493,12 @@ def search_history_ranked_native(
     candidate_indices: Optional[Sequence[int]] = None,
     limit: Optional[int] = None,
     current_cwd: Optional[str] = None,
-) -> tuple[list[MatchResult], Optional[list[int]], int]:
+) -> tuple[list[MatchResult], Optional[list[int]]]:
     """Run matching and result ordering in the Rust-owned history cache."""
     if len(native_candidates) != len(history):
         raise ValueError("native and Python history lengths differ")
     result_limit = limit if (limit is None or limit > 0) else None
-    selected, matched_indices, matched_count = native_candidates.search_ranked(
+    selected, matched_indices = native_candidates.search_ranked(
         query.lower(),
         query.strip().lower(),
         shell_words_for_matching(query),
@@ -1523,7 +1523,7 @@ def search_history_ranked_native(
                 words=entry.words,
             )
         )
-    return results, matched_indices, matched_count
+    return results, matched_indices
 
 
 def search_history_response_frame_native(
@@ -1830,7 +1830,6 @@ class HistoryDaemonClient:
     def ensure_running(self) -> bool:
         if _native_ping_daemon(str(self.socket_path), 0.15):
             daemon_debug_log(self.debug, f"using existing daemon at {self.socket_path}")
-            self._debug_log_baseline_count()
             return True
 
         if self.socket_path.exists():
@@ -1855,23 +1854,10 @@ class HistoryDaemonClient:
         while time.monotonic() < deadline:
             if _native_ping_daemon(str(self.socket_path), 0.15):
                 daemon_debug_log(self.debug, "new daemon is ready")
-                self._debug_log_baseline_count()
                 return True
             time.sleep(0.03)
         daemon_debug_log(self.debug, "daemon did not become ready before timeout")
         return False
-
-    def _debug_log_baseline_count(self) -> None:
-        if not self.debug:
-            return
-        exchanged, response = _native_search_daemon(
-            str(self.socket_path), "", None, 1, None, 0.2
-        )
-        if not exchanged or response is None:
-            daemon_debug_log(self.debug, "matched_count=<unavailable>")
-            return
-        _, _, count = response
-        daemon_debug_log(self.debug, f"matched_count={count} for empty query")
 
     def search_history(
         self,
@@ -1880,7 +1866,7 @@ class HistoryDaemonClient:
         candidate_indices: Optional[Sequence[int]] = None,
         limit: Optional[int] = None,
         cwd: Optional[str] = None,
-    ) -> Optional[tuple[list[MatchResult], Optional[list[int]], int]]:
+    ) -> Optional[tuple[list[MatchResult], Optional[list[int]]]]:
         bounded_indices = (
             candidate_indices
             if candidate_indices is not None
@@ -1910,7 +1896,7 @@ class HistoryDaemonClient:
         if parsed_native is None:
             return None
 
-        raw_results, parsed_indices, matched_count = parsed_native
+        raw_results, parsed_indices = parsed_native
         parsed_results = [
             MatchResult(
                 text=text,
@@ -1927,9 +1913,9 @@ class HistoryDaemonClient:
             indices_state = "included" if parsed_indices is not None else "omitted"
             daemon_debug_log(
                 True,
-                f"query={query!r} matched_count={matched_count} matched_indices={indices_state}",
+                f"query={query!r} matched_indices={indices_state}",
             )
-        return parsed_results, parsed_indices, matched_count
+        return parsed_results, parsed_indices
 
 
 def run_history_daemon(

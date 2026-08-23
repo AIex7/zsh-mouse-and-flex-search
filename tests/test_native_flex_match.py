@@ -189,14 +189,13 @@ class NativeFlexMatchTests(unittest.TestCase):
                 limit=4,
                 current_cwd="/repo",
             )
-            actual_results, actual_indices, actual_count = actual
+            actual_results, actual_indices = actual
             expected_payload = (
                 expected_indices
                 if query and len(expected_indices) <= engine.MAX_CACHED_CANDIDATE_INDICES
                 else None
             )
             self.assertEqual(actual_indices, expected_payload, query)
-            self.assertEqual(actual_count, len(expected_indices), query)
             self.assertEqual(actual_results, expected_results, query)
             self.assertEqual(
                 engine.apply_prefix_priority(
@@ -217,14 +216,13 @@ class NativeFlexMatchTests(unittest.TestCase):
                 limit=4,
                 current_cwd="/repo",
             )
-            self.assertEqual(frame[:4], b"ZFH\x01")
+            self.assertEqual(frame[:4], b"ZFH\x02")
             self.assertEqual(int.from_bytes(frame[4:8], "little"), len(frame) - 8)
             parsed_response = native.parse_search_response(frame)
             self.assertIsNotNone(parsed_response)
             assert parsed_response is not None
-            parsed_results, parsed_indices, parsed_count = parsed_response
+            parsed_results, parsed_indices = parsed_response
             self.assertEqual(parsed_indices, expected_payload, query)
-            self.assertEqual(parsed_count, len(expected_indices), query)
             self.assertEqual(
                 parsed_results,
                 [
@@ -251,12 +249,12 @@ class NativeFlexMatchTests(unittest.TestCase):
             100,
             "/repo",
         )
-        self.assertEqual(serialized[:4], b"ZFH\x01")
+        self.assertEqual(serialized[:4], b"ZFH\x02")
         self.assertEqual(int.from_bytes(serialized[4:8], "little"), len(serialized) - 8)
         self.assertEqual(serialized[8], 2)
         self.assertNotIn(b"search_history", serialized)
         minimal = native.serialize_search_request("x")
-        self.assertEqual(minimal[:4], b"ZFH\x01")
+        self.assertEqual(minimal[:4], b"ZFH\x02")
         self.assertLess(len(minimal), len(serialized))
 
     def test_native_daemon_round_trip(self) -> None:
@@ -312,13 +310,12 @@ class NativeFlexMatchTests(unittest.TestCase):
         )
         self.assertIsNotNone(parsed)
         assert parsed is not None
-        self.assertEqual(parsed[1:], ([0], 1))
+        self.assertEqual(parsed[1], [0])
         self.assertEqual(parsed[0][0][0], "git status --short")
         self.assertIsNotNone(client_result)
         assert client_result is not None
-        client_results, client_indices, client_count = client_result
+        client_results, client_indices = client_result
         self.assertEqual(client_indices, [0])
-        self.assertEqual(client_count, 1)
         self.assertEqual(client_results[0].text, "git status --short")
 
     def test_native_daemon_server_dispatch(self) -> None:
@@ -359,11 +356,11 @@ class NativeFlexMatchTests(unittest.TestCase):
             socket_mode = socket_path.stat().st_mode & 0o777
 
         self.assertFalse(server_thread.is_alive())
-        self.assertEqual(malformed_response[:4], b"ZFH\x01")
+        self.assertEqual(malformed_response[:4], b"ZFH\x02")
         self.assertEqual(malformed_response[8], 0xFF)
         self.assertTrue(ping)
         self.assertTrue(exchanged)
-        self.assertEqual(search_response, ([], [], 0))
+        self.assertEqual(search_response, ([], []))
         self.assertEqual(socket_mode, 0o600)
         self.assertEqual(
             captured,

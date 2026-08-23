@@ -327,7 +327,6 @@ def draw_panel(
     clear_previous_cursor: bool = True,
     status_message: str = "",
     debug_note: str = "",
-    total_count: Optional[int] = None,
     syntax_tokens: Optional[list[str]] = None,
     query_rows: Optional[list[QueryVisualRow]] = None,
     render_line_cache: Optional[dict[tuple[object, ...], str]] = None,
@@ -424,9 +423,6 @@ def draw_panel(
                     query_line += f" {muted}{note_text}{RESET}"
         query_lines.append(query_line)
 
-    effective_total = max(len(results), total_count or 0)
-    top_remaining = max(0, effective_total - results_visible)
-    use_visible_total_for_more = top_remaining <= 97
     shared_result_width = max(1, min(result_render_width, RESULT_PREFIX_WIDTH + FIXED_MATCH_TEXT_WIDTH))
     result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None)
     runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None)
@@ -441,11 +437,6 @@ def draw_panel(
             else:
                 result_lines.append("")
             continue
-        remaining = max(0, effective_total - (offset + results_visible))
-        if use_visible_total_for_more:
-            remaining = max(0, len(results) - (offset + results_visible))
-        is_last_visible_row = i == (results_visible - 1)
-        # more_text = f"{remaining} more" if (is_last_visible_row and remaining > 0) else ""
         item = results[idx]
         is_selected = idx == selected
         cache_key = (
@@ -906,7 +897,6 @@ def run(
             results_visible = max(1, panel_rows - 1)
             render_width = 1
             initial_matched_indices: Optional[list[int]] = None
-            initial_matched_count: Optional[int] = None
             loaded = history_client.search_history(
                 "",
                 limit=MAX_RETURNED_RESULTS,
@@ -916,26 +906,21 @@ def run(
                 initial_results = []
                 history_load_error = True
             else:
-                history_matches, initial_matched_indices, initial_matched_count = loaded
+                history_matches, initial_matched_indices = loaded
                 initial_results = history_matches
                 history_load_error = False
             last_query = ""
             last_matched_indices = initial_matched_indices
-            initial_total_count = max(len(initial_results), initial_matched_count or 0)
-            match_cache: dict[str, tuple[Optional[array], list[MatchResult], Optional[int], int]] = {
+            match_cache: dict[str, tuple[Optional[array], list[MatchResult]]] = {
                 "": (
                     array("I", initial_matched_indices) if initial_matched_indices is not None else None,
                     initial_results,
-                    initial_matched_count,
-                    initial_total_count,
                 )
             }
             cache_order: list[str] = [""]
             cache_limit = 128
             displayed_results = initial_results
             displayed_matched_indices = initial_matched_indices
-            displayed_matched_count = initial_matched_count
-            displayed_total_count = initial_total_count
             mouse_selecting = False
             mouse_enabled = False
             kitty_keyboard_enabled = False
@@ -947,7 +932,7 @@ def run(
             last_drawn_panel_rows = panel_rows
             search_requests: queue.Queue[Optional[tuple[str, Optional[Sequence[int]], str]]] = queue.Queue()
             search_updates: queue.Queue[
-                tuple[str, Optional[list[int]], list[MatchResult], Optional[int], int, bool]
+                tuple[str, Optional[list[int]], list[MatchResult], bool]
             ] = queue.Queue()
             search_stop = threading.Event()
             queued_search_key: Optional[str] = None
@@ -960,7 +945,7 @@ def run(
                 query_text: str,
                 candidate_indices: Optional[Sequence[int]],
                 cwd_text: str,
-            ) -> tuple[Optional[list[int]], list[MatchResult], Optional[int], int, bool]:
+            ) -> tuple[Optional[list[int]], list[MatchResult], bool]:
                 search_error = False
                 remote = history_client.search_history(
                     query_text,
@@ -971,14 +956,12 @@ def run(
                 if remote is None:
                     history_results = []
                     matched_indices = None
-                    matched_count = None
                     search_error = True
                 else:
-                    history_results, matched_indices, matched_count = remote
+                    history_results, matched_indices = remote
                 # The daemon has already applied this ordering and limit in Rust.
                 resolved_results = history_results
-                total_count = max(len(resolved_results), matched_count or 0)
-                return matched_indices, resolved_results, matched_count, total_count, search_error
+                return matched_indices, resolved_results, search_error
 
             def search_worker() -> None:
                 while True:
@@ -986,13 +969,13 @@ def run(
                     if request is None:
                         break
                     query_text, candidate_indices, cwd_text = request
-                    matched_indices, resolved_results, matched_count, total_count, search_error = run_search_request(
+                    matched_indices, resolved_results, search_error = run_search_request(
                         query_text,
                         candidate_indices,
                         cwd_text,
                     )
                     search_updates.put(
-                        (query_text, matched_indices, resolved_results, matched_count, total_count, search_error)
+                        (query_text, matched_indices, resolved_results, search_error)
                     )
 
             search_thread = threading.Thread(target=search_worker, daemon=True)
@@ -1251,8 +1234,6 @@ def run(
                 key: str,
                 indices: Optional[list[int] | array],
                 cached_results: list[MatchResult],
-                matched_count: Optional[int],
-                total_count: int,
             ) -> None:
                 if key in match_cache:
                     return
@@ -1261,7 +1242,7 @@ def run(
                     match_cache.pop(oldest, None)
                 cache_order.append(key)
                 packed_indices = array("I", indices) if indices is not None else None
-                match_cache[key] = (packed_indices, cached_results, matched_count, total_count)
+                match_cache[key] = (packed_indices, cached_results)
 
             try:
                 skip_previous_cursor_clear = False
@@ -1274,24 +1255,20 @@ def run(
                     while True:
                         try:
                             (
-                                result_query,
-                                result_indices,
-                                result_results,
-                                result_count,
-                                result_total,
-                                result_error,
-                            ) = search_updates.get_nowait()
+                            result_query,
+                            result_indices,
+                            result_results,
+                            result_error,
+                        ) = search_updates.get_nowait()
                         except queue.Empty:
                             break
                         queued_search_key = None if queued_search_key == result_query else queued_search_key
-                        cache_put(result_query, result_indices, result_results, result_count, result_total)
+                        cache_put(result_query, result_indices, result_results)
                         if result_error:
                             history_load_error = True
                         if result_query == query:
                             displayed_matched_indices = result_indices
                             displayed_results = filter_exact_query_match(query, result_results)
-                            displayed_matched_count = result_count
-                            displayed_total_count = result_total
 
                     pending_event: Optional[tuple[str, object]] = None
                     term_size = tty_terminal_size(fd)
@@ -1332,12 +1309,10 @@ def run(
                     visible = max(1, layout_results_visible)
                     cache_key = query
                     if cache_key in match_cache:
-                        matched_indices, results, matched_count, total_count = match_cache[cache_key]
+                        matched_indices, results = match_cache[cache_key]
                         results = filter_exact_query_match(query, results)
                         displayed_matched_indices = matched_indices
                         displayed_results = results
-                        displayed_matched_count = matched_count
-                        displayed_total_count = total_count
                     else:
                         if queued_search_key != cache_key:
                             # Incremental candidate filtering stays in the daemon;
@@ -1346,8 +1321,6 @@ def run(
                             queued_search_key = cache_key
                         matched_indices = displayed_matched_indices
                         results = filter_exact_query_match(query, displayed_results)
-                        matched_count = displayed_matched_count
-                        total_count = displayed_total_count
                     runtime_limit = 1
                     if len(results) == 1:
                         runtime_limit = 2
@@ -1380,9 +1353,8 @@ def run(
                     status_message = ""
                     debug_note = ""
                     if history_client.debug:
-                        count_text = "?" if matched_count is None else str(matched_count)
                         indices_text = "no-idx" if matched_indices is None else "idx"
-                        debug_note = f"matches={count_text} {indices_text}"
+                        debug_note = indices_text
                     if history_load_error and not results:
                         status_message = "history load failed"
                     if selected >= len(results):
@@ -1408,7 +1380,6 @@ def run(
                         clear_previous_cursor=not skip_previous_cursor_clear,
                         status_message=status_message,
                         debug_note=debug_note,
-                        total_count=total_count,
                         syntax_tokens=syntax_tokens,
                         query_rows=query_rows,
                         render_line_cache=render_line_cache,
