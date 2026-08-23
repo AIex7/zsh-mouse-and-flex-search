@@ -104,10 +104,11 @@ pub fn run(
         }
     };
 
-    let cursor_color_override = query_cursor_color(fd);
+    let (cursor_color_override, background_color_override) = query_terminal_colors(fd);
+    let cursor_text_color = background_color_override.as_deref().unwrap_or(DORIC_FG_MAIN);
     let visual_cursor_bg_style = if let Some(color_hex) = &cursor_color_override {
         style(StyleOptions {
-            fg_rgb: Some(DORIC_FG_MAIN),
+            fg_rgb: Some(cursor_text_color),
             bg_rgb: Some(color_hex),
             ..Default::default()
         })
@@ -115,26 +116,31 @@ pub fn run(
         let val = env_color.trim().to_lowercase();
         if val.starts_with('#') && val.len() == 7 {
             style(StyleOptions {
-                fg_rgb: Some(DORIC_FG_MAIN),
+                fg_rgb: Some(cursor_text_color),
                 bg_rgb: Some(&val),
                 ..Default::default()
             })
         } else if let Some(slot) = ansi_color_from_env("ZSH_FLEX_HISTORY_CURSOR_COLOR", None) {
             style(StyleOptions {
-                fg: ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None),
+                fg: if background_color_override.is_none() {
+                    ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None)
+                } else {
+                    None
+                },
+                fg_rgb: background_color_override.as_deref(),
                 bg: Some(slot),
                 ..Default::default()
             })
         } else {
             style(StyleOptions {
-                fg_rgb: Some(DORIC_FG_MAIN),
+                fg_rgb: Some(cursor_text_color),
                 bg_rgb: Some(DORIC_BG_ACCENT),
                 ..Default::default()
             })
         }
     } else {
         style(StyleOptions {
-            fg_rgb: Some(DORIC_FG_MAIN),
+            fg_rgb: Some(cursor_text_color),
             bg_rgb: Some(DORIC_BG_ACCENT),
             ..Default::default()
         })

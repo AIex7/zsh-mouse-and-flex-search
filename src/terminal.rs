@@ -220,9 +220,10 @@ fn scale_hex_component(component: &str) -> Option<u8> {
     Some(((value as f64 / max_val as f64) * 255.0).round() as u8)
 }
 
-pub fn parse_cursor_color_response(bytes: &[u8]) -> Option<String> {
+fn parse_osc_color_response(bytes: &[u8], osc_number: u8) -> Option<String> {
     let mut pos = 0;
-    let prefix = b"\x1b]12;rgb:";
+    let prefix = format!("\x1b]{osc_number};rgb:");
+    let prefix = prefix.as_bytes();
     while pos < bytes.len() {
         if bytes[pos..].starts_with(prefix) {
             let start = pos + prefix.len();
@@ -250,19 +251,46 @@ pub fn parse_cursor_color_response(bytes: &[u8]) -> Option<String> {
     None
 }
 
-pub fn query_cursor_color(fd: RawFd) -> Option<String> {
-    if let Ok(env_val) = std::env::var("ZSH_FLEX_HISTORY_CURSOR_COLOR") {
+pub fn parse_cursor_color_response(bytes: &[u8]) -> Option<String> {
+    parse_osc_color_response(bytes, 12)
+}
+
+pub fn parse_background_color_response(bytes: &[u8]) -> Option<String> {
+    parse_osc_color_response(bytes, 11)
+}
+
+fn configured_terminal_color(name: &str) -> (Option<String>, bool) {
+    if let Ok(env_val) = std::env::var(name) {
         let val = env_val.trim().to_lowercase();
         if matches!(val.as_str(), "" | "none" | "disabled" | "unsupported" | "off" | "0") {
-            return None;
+            return (None, false);
         }
         if val.starts_with('#') && val.len() == 7 && val[1..].chars().all(|c| c.is_ascii_hexdigit()) {
-            return Some(val);
+            return (Some(val), false);
         }
+    }
+    (None, true)
+}
+
+pub fn query_terminal_colors(fd: RawFd) -> (Option<String>, Option<String>) {
+    let (mut cursor_color, query_cursor) =
+        configured_terminal_color("ZSH_FLEX_HISTORY_CURSOR_COLOR");
+    let (mut background_color, query_background) =
+        configured_terminal_color("ZSH_FLEX_HISTORY_BACKGROUND_COLOR");
+
+    if !query_cursor && !query_background {
+        return (cursor_color, background_color);
     }
 
     drain_input(fd);
-    term_write(fd, "\x1b]12;?\x07");
+    let mut request = String::new();
+    if query_background {
+        request.push_str("\x1b]11;?\x07");
+    }
+    if query_cursor {
+        request.push_str("\x1b]12;?\x07");
+    }
+    term_write(fd, &request);
 
     let mut buf = Vec::new();
     let deadline = Instant::now() + Duration::from_millis(25);
@@ -276,18 +304,40 @@ pub fn query_cursor_color(fd: RawFd) -> Option<String> {
             break;
         }
         buf.extend_from_slice(&chunk[..n as usize]);
-        if buf.contains(&0x07) || buf.windows(2).any(|w| w == b"\x1b\\") {
+        if query_background && background_color.is_none() {
+            background_color = parse_background_color_response(&buf);
+        }
+        if query_cursor && cursor_color.is_none() {
+            cursor_color = parse_cursor_color_response(&buf);
+        }
+        if (!query_background || background_color.is_some())
+            && (!query_cursor || cursor_color.is_some())
+        {
             break;
         }
     }
 
-    let parsed = parse_cursor_color_response(&buf);
-    if parsed.is_none() {
+    if query_cursor && cursor_color.is_none() {
         std::env::set_var("ZSH_FLEX_HISTORY_CURSOR_COLOR", "none");
-    } else if let Some(ref color) = parsed {
+    } else if query_cursor {
+        let color = cursor_color.as_deref().unwrap_or_default();
         std::env::set_var("ZSH_FLEX_HISTORY_CURSOR_COLOR", color);
     }
-    parsed
+    if query_background && background_color.is_none() {
+        std::env::set_var("ZSH_FLEX_HISTORY_BACKGROUND_COLOR", "none");
+    } else if query_background {
+        let color = background_color.as_deref().unwrap_or_default();
+        std::env::set_var("ZSH_FLEX_HISTORY_BACKGROUND_COLOR", color);
+    }
+    (cursor_color, background_color)
+}
+
+pub fn query_cursor_color(fd: RawFd) -> Option<String> {
+    query_terminal_colors(fd).0
+}
+
+pub fn query_background_color(fd: RawFd) -> Option<String> {
+    query_terminal_colors(fd).1
 }
 
 pub fn write_clipboard(text: &str) -> bool {
@@ -359,6 +409,16 @@ mod terminal_tests {
     #[test]
     fn parse_cursor_color_extracts_rgb() {
         let raw = b"\x1b]12;rgb:2020/5757/9898\x07";
+        assert_eq!(parse_cursor_color_response(raw), Some("#205798".to_string()));
+    }
+
+    #[test]
+    fn parses_background_and_cursor_colors_from_one_response() {
+        let raw = b"\x1b]11;rgb:ffff/f0f0/e5e5\x07\x1b]12;rgb:2020/5757/9898\x1b\\";
+        assert_eq!(
+            parse_background_color_response(raw),
+            Some("#fff0e5".to_string())
+        );
         assert_eq!(parse_cursor_color_response(raw), Some("#205798".to_string()));
     }
 }
