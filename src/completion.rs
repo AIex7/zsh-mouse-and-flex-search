@@ -174,9 +174,9 @@ pub fn runtime_completion_matches(
     }
 
     let (start, end) = token_bounds(query, cursor_pos);
-    let raw_token = &query[start..end];
-    let (quote, _) = enclosing_quote(raw_token);
-    let stripped = strip_enclosing_quotes(raw_token);
+    let raw_token = query_char_slice(query, start, end);
+    let (quote, _) = enclosing_quote(&raw_token);
+    let stripped = strip_enclosing_quotes(&raw_token);
     if stripped.is_empty() {
         return Vec::new();
     }
@@ -364,4 +364,29 @@ pub fn insert_runtime_completions(
         merged_texts.insert(runtime_completion.text.clone());
     }
     merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_completion_handles_non_ascii_token_boundaries() {
+        let entries = vec![DirectoryListingEntry {
+            name: "café-file".to_string(),
+            is_dir: false,
+        }];
+        let query = "echo café";
+
+        let matches = runtime_completion_matches(
+            query,
+            query.chars().count(),
+            Some(&entries),
+            Path::new("."),
+            10,
+        );
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].text, "echo caf\\é-file");
+    }
 }
