@@ -605,6 +605,14 @@ pub struct NativeCandidate {
     pub words: CompactWords,
     pub failed: bool,
     pub ascii: bool,
+    length_reciprocal: u64,
+}
+
+fn fixed_point_reciprocal(denominator: usize) -> u64 {
+    if denominator <= 1 {
+        return 0;
+    }
+    ((1_u128 << 64) / denominator as u128) as u64
 }
 
 impl NativeCandidate {
@@ -637,6 +645,11 @@ impl NativeCandidate {
         } else {
             compute_bigram_mask_str(lower)
         };
+        let candidate_length = if ascii {
+            lower.len()
+        } else {
+            lower.chars().count()
+        };
         let words = CompactWords::new(lower, words);
         let candidate = Self {
             text,
@@ -647,6 +660,7 @@ impl NativeCandidate {
             words,
             failed,
             ascii,
+            length_reciprocal: fixed_point_reciprocal(candidate_length),
         };
         (candidate, char_mask, bigram_mask)
     }
@@ -775,6 +789,7 @@ pub struct RankedMatch {
     pub score: i64,
     pub scan_order: usize,
     pub metrics: FlexMetrics,
+    length_reciprocal: u64,
 }
 
 const NORMALIZED_FLEX_SCALE: u64 = 1_000_000;
@@ -792,10 +807,34 @@ fn normalized_ratio(numerator: usize, denominator: usize) -> u64 {
     }
 }
 
-pub fn normalized_flex_admission_score(
+fn normalized_ratio_with_reciprocal(
+    numerator: usize,
+    denominator: usize,
+    reciprocal: u64,
+) -> u64 {
+    if denominator == 0 || numerator >= denominator {
+        return NORMALIZED_FLEX_SCALE;
+    }
+    let numerator = numerator as u64;
+    let denominator = denominator as u64;
+    if denominator > u64::MAX / NORMALIZED_FLEX_SCALE {
+        return ((numerator as u128 * NORMALIZED_FLEX_SCALE as u128)
+            / denominator as u128) as u64;
+    }
+    let scaled_numerator = numerator * NORMALIZED_FLEX_SCALE;
+    let mut quotient =
+        ((scaled_numerator as u128 * reciprocal as u128) >> 64) as u64;
+    if scaled_numerator - quotient * denominator >= denominator {
+        quotient += 1;
+    }
+    quotient
+}
+
+fn normalized_flex_admission_score_with_length_reciprocal(
     metrics: FlexMetrics,
     query_length: usize,
     recency_quality: Option<u64>,
+    length_reciprocal: Option<u64>,
 ) -> u64 {
     let run_quality = normalized_ratio(metrics.longest_run, query_length);
     let adjacency_quality = if query_length <= 1 {
@@ -805,8 +844,30 @@ pub fn normalized_flex_admission_score(
     };
     let continuity_quality = (run_quality + adjacency_quality) / 2;
     let span_quality = normalized_ratio(query_length, metrics.span);
-    let length_quality = normalized_ratio(query_length, metrics.candidate_len);
+    let length_quality = length_reciprocal.map_or_else(
+        || normalized_ratio(query_length, metrics.candidate_len),
+        |reciprocal| {
+            normalized_ratio_with_reciprocal(
+                query_length,
+                metrics.candidate_len,
+                reciprocal,
+            )
+        },
+    );
     continuity_quality + span_quality + length_quality + recency_quality.unwrap_or(0)
+}
+
+pub fn normalized_flex_admission_score(
+    metrics: FlexMetrics,
+    query_length: usize,
+    recency_quality: Option<u64>,
+) -> u64 {
+    normalized_flex_admission_score_with_length_reciprocal(
+        metrics,
+        query_length,
+        recency_quality,
+        None,
+    )
 }
 
 fn build_normalized_recency(history_length: usize) -> Vec<u32> {
@@ -884,15 +945,17 @@ fn bounded_pairwise_pool(
     normalized_recency: &[u32],
 ) -> Vec<RankedMatch> {
     matches.sort_by(|left, right| {
-        normalized_flex_admission_score(
+        normalized_flex_admission_score_with_length_reciprocal(
             right.metrics,
             query_length,
             include_recency.then(|| normalized_recency[right.index] as u64),
+            Some(right.length_reciprocal),
         )
-        .cmp(&normalized_flex_admission_score(
+        .cmp(&normalized_flex_admission_score_with_length_reciprocal(
             left.metrics,
             query_length,
             include_recency.then(|| normalized_recency[left.index] as u64),
+            Some(left.length_reciprocal),
         ))
         .then_with(|| left.index.cmp(&right.index))
     });
@@ -1344,6 +1407,7 @@ impl NativeHistory {
                         score: 0,
                         scan_order,
                         metrics,
+                        length_reciprocal: candidate.length_reciprocal,
                     });
                 }
 
@@ -1463,6 +1527,7 @@ impl NativeHistory {
                     score: 0,
                     scan_order,
                     metrics,
+                    length_reciprocal: candidate.length_reciprocal,
                 });
             } else {
                 if scored_buckets_by_prefix.len() <= prefix_word_count {
@@ -1471,10 +1536,11 @@ impl NativeHistory {
                     });
                 }
                 let heap = &mut scored_buckets_by_prefix[prefix_word_count][inner_bucket - 2];
-                let admission_score = normalized_flex_admission_score(
+                let admission_score = normalized_flex_admission_score_with_length_reciprocal(
                     metrics,
                     query.len(),
                     Some(self.normalized_recency[index] as u64),
+                    Some(candidate.length_reciprocal),
                 );
                 let heap_entry = (
                     Reverse(admission_score),
@@ -1575,6 +1641,7 @@ impl NativeHistory {
                                 span,
                                 candidate_len,
                             },
+                            length_reciprocal: self.candidates[index].length_reciprocal,
                         });
                     }
                 }
@@ -1803,6 +1870,33 @@ mod normalized_ratio_tests {
             );
         }
         assert_eq!(normalized_ratio(0, 0), NORMALIZED_FLEX_SCALE);
+    }
+
+    #[test]
+    fn precomputed_length_reciprocal_matches_exact_division() {
+        for denominator in 1..=512 {
+            let reciprocal = fixed_point_reciprocal(denominator);
+            for numerator in 0..=denominator {
+                assert_eq!(
+                    normalized_ratio_with_reciprocal(
+                        numerator,
+                        denominator,
+                        reciprocal,
+                    ),
+                    normalized_ratio(numerator, denominator),
+                    "numerator={numerator}, denominator={denominator}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_length_reciprocal_uses_character_length() {
+        let (candidate, _, _) = candidate_from_input(candidate("café"), &mut HashSet::new());
+        assert_eq!(
+            normalized_ratio_with_reciprocal(2, 4, candidate.length_reciprocal),
+            500_000
+        );
     }
 
     #[cfg(target_pointer_width = "64")]
