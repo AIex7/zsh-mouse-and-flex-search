@@ -571,12 +571,11 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
                 return "backspace", None
             if codepoint == 27:
                 return "escape", None
-            # Kitty's enhanced keyboard protocol reports Ctrl-letter keys as
-            # printable codepoints plus the Ctrl modifier.
+            # Kitty's enhanced keyboard protocol reports Ctrl-C as the
+            # printable C codepoint plus the Ctrl modifier (CSI 99;5u),
+            # rather than as the single ETX byte used by legacy terminals.
             if codepoint in (67, 99) and ctrl:
-                return "copy", None
-            if codepoint in (86, 118) and ctrl:
-                return "paste", None
+                return "interrupt", None
             if codepoint == 1 and ctrl:
                 return "home", None
             if codepoint == 5 and ctrl:
@@ -692,9 +691,7 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
 
         ch = data[0]
         if ch == 3:
-            return "copy", None
-        if ch == 22:
-            return "paste", None
+            return "interrupt", None
         if ch == 1:
             return "home", None
         if ch == 5:
