@@ -9,10 +9,8 @@ Use the mouse to edit commands in your terminal just like regular text, drag and
 
 Install from GitHub. This requires Rust (`cargo`):
 
-```bash
-git clone https://github.com/AIex7/zsh-mouse-and-flex-search
-cd zsh-mouse-and-flex-search
-cargo install --path . --force
+```zsh
+cargo install --git https://github.com/AIex7/zsh-mouse-and-flex-search --force
 printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}/.zshrc"
 ```
 
@@ -20,7 +18,7 @@ printf '%s\n' 'eval "$(zsh-flex-history-init-zsh --hook)"' >> "${ZDOTDIR:-$HOME}
 
 Optionally, to import your existing Zsh history into the custom SQLite history database, run:
 
-```bash
+```zsh
 zsh-flex-history-import
 ```
 
