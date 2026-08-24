@@ -523,4 +523,24 @@ mod tests {
 
         assert_eq!(ranked, vec![(1, 0), (0, 0)]);
     }
+
+    #[test]
+    fn match_separators_are_ignored_without_crossing_other_characters() {
+        assert_eq!(compact_query("one-two_three"), "onetwothree".chars().collect::<Vec<_>>());
+        assert!(word_starts_with_ignoring_separators("one-two", "onetwo"));
+        assert!(word_starts_with_ignoring_separators("one_two", "one-two"));
+        assert!(!word_starts_with_ignoring_separators("one-x-two", "onetwo"));
+        assert!(words_appear_in_order(
+            &["one".to_string(), "two".to_string()],
+            "echo one-two"
+        ));
+        assert!(words_appear_in_order(
+            &["onetwo".to_string()],
+            "echo one_two"
+        ));
+        assert!(!words_appear_in_order(
+            &["onetwo".to_string()],
+            "echo one x two"
+        ));
+    }
 }

@@ -34,8 +34,13 @@ pub fn python_trim(value: &str) -> &str {
 pub fn compact_query(query_lower: &str) -> Vec<char> {
     query_lower
         .chars()
-        .filter(|character| !character.is_whitespace())
+        .filter(|character| !character.is_whitespace() && !is_match_separator(*character))
         .collect()
+}
+
+#[inline]
+pub fn is_match_separator(character: char) -> bool {
+    matches!(character, '-' | '_')
 }
 
 pub fn ascii_query(query: &[char]) -> Option<Vec<u8>> {
@@ -700,16 +705,60 @@ pub struct RankedMatch {
     pub scan_order: usize,
 }
 
+pub fn word_starts_with_ignoring_separators(word: &str, prefix: &str) -> bool {
+    let mut word_chars = word.chars().filter(|character| !is_match_separator(*character));
+    let mut matched_any = false;
+    for expected in prefix.chars().filter(|character| !is_match_separator(*character)) {
+        matched_any = true;
+        if word_chars.next() != Some(expected) {
+            return false;
+        }
+    }
+    matched_any
+}
+
+fn find_word_ignoring_separators(text: &str, word: &str) -> Option<usize> {
+    if !word.chars().any(|character| !is_match_separator(character)) {
+        return None;
+    }
+
+    for (start, start_character) in text.char_indices() {
+        if is_match_separator(start_character) {
+            continue;
+        }
+        let mut text_chars = text[start..]
+            .char_indices()
+            .filter(|(_, character)| !is_match_separator(*character));
+        let mut end = start;
+        let mut matched = true;
+        for expected in word.chars().filter(|character| !is_match_separator(*character)) {
+            match text_chars.next() {
+                Some((offset, actual)) if actual == expected => {
+                    end = start + offset + actual.len_utf8();
+                }
+                _ => {
+                    matched = false;
+                    break;
+                }
+            }
+        }
+        if matched {
+            return Some(end);
+        }
+    }
+    None
+}
+
 pub fn words_appear_in_order(words: &[String], text_lower: &str) -> bool {
     if words.is_empty() {
         return false;
     }
     let mut remaining = text_lower;
     for word in words {
-        let Some(position) = remaining.find(word) else {
+        let Some(end) = find_word_ignoring_separators(remaining, word) else {
             return false;
         };
-        remaining = &remaining[position + word.len()..];
+        remaining = &remaining[end..];
     }
     true
 }
@@ -987,7 +1036,8 @@ impl NativeHistory {
 
         let result_limit = limit.unwrap_or(usize::MAX);
         let single_char_query = query.len() == 1;
-        let single_ascii_prefix_byte = if prefix_query_words.len() == 1
+        let single_ascii_prefix_byte = if single_char_query
+            && prefix_query_words.len() == 1
             && prefix_query_words[0].len() == 1
             && prefix_query_words[0].is_ascii()
         {
@@ -1064,7 +1114,10 @@ impl NativeHistory {
                 let prefix_word_count = usize::from(
                     candidate.text_lower().as_bytes().first().copied()
                         == single_ascii_prefix_byte,
-                );
+                )
+                .max(usize::from(candidate.first_word().is_some_and(|word| {
+                    word_starts_with_ignoring_separators(word, &prefix_query_words[0])
+                })));
                 let same_cwd = current_cwd.is_some_and(|cwd| {
                     candidate
                         .cwd
@@ -1115,7 +1168,9 @@ impl NativeHistory {
                     1
                 } else if candidate
                     .first_word()
-                    .is_some_and(|word| word.starts_with(prefix_query_words[0].as_str()))
+                    .is_some_and(|word| {
+                        word_starts_with_ignoring_separators(word, &prefix_query_words[0])
+                    })
                 {
                     1
                 } else {
@@ -1123,7 +1178,11 @@ impl NativeHistory {
                 }
             } else if prefix_query_words.len() == 1 {
                 let prefix = prefix_query_words[0].as_str();
-                let has_prefix_match = if prefix_bigram_mask != 0 {
+                let separator_aware = prefix.chars().any(is_match_separator)
+                    || candidate
+                        .first_word()
+                        .is_some_and(|word| word.chars().any(is_match_separator));
+                let has_prefix_match = if prefix_bigram_mask != 0 && !separator_aware {
                     self.bigram_masks
                         .get(index)
                         .map_or(true, |&bm| (bm & prefix_bigram_mask) == prefix_bigram_mask)
@@ -1133,7 +1192,7 @@ impl NativeHistory {
                 if has_prefix_match
                     && candidate
                         .first_word()
-                        .is_some_and(|word| word.starts_with(prefix))
+                        .is_some_and(|word| word_starts_with_ignoring_separators(word, prefix))
                 {
                     1
                 } else {
@@ -1148,17 +1207,23 @@ impl NativeHistory {
                     .take_while(|(index, query_word)| {
                         candidate
                             .word(*index)
-                            .is_some_and(|word| word.starts_with(query_word.as_str()))
+                            .is_some_and(|word| {
+                                word_starts_with_ignoring_separators(word, query_word)
+                            })
                     })
                     .count()
             };
             let words_in_order = if ordered_query_words.is_empty() {
                 false
             } else if query_words_bigram_mask != 0 {
-                let has_bigram_match = self
-                    .bigram_masks
-                    .get(index)
-                    .map_or(true, |&bm| (bm & query_words_bigram_mask) == query_words_bigram_mask);
+                let separator_aware = ordered_query_words
+                    .iter()
+                    .any(|word| word.chars().any(is_match_separator))
+                    || candidate.text_lower().chars().any(is_match_separator);
+                let has_bigram_match = separator_aware
+                    || self.bigram_masks.get(index).map_or(true, |&bm| {
+                        (bm & query_words_bigram_mask) == query_words_bigram_mask
+                    });
                 if has_bigram_match {
                     words_appear_in_order(ordered_query_words, candidate.text_lower())
                 } else {
