@@ -107,7 +107,10 @@ fn parse_csi_key(full: &[u8]) -> Option<InputEvent> {
                 return Some(InputEvent::Escape);
             }
             if (codepoint == 67 || codepoint == 99) && ctrl {
-                return Some(InputEvent::Interrupt);
+                return Some(InputEvent::Copy);
+            }
+            if (codepoint == 86 || codepoint == 118) && ctrl {
+                return Some(InputEvent::Paste);
             }
             if codepoint == 1 && ctrl {
                 return Some(InputEvent::Home);
@@ -272,7 +275,10 @@ pub fn read_key(fd: RawFd, timeout: Option<Duration>) -> InputEvent {
         };
 
         if ch == 3 {
-            return InputEvent::Interrupt;
+            return InputEvent::Copy;
+        }
+        if ch == 22 {
+            return InputEvent::Paste;
         }
         if ch == 1 {
             return InputEvent::Home;
@@ -370,5 +376,43 @@ pub fn read_key(fd: RawFd, timeout: Option<Duration>) -> InputEvent {
             }
             return InputEvent::Char(read_utf8_char(fd, ch));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_encoded_key(encoded: &[u8]) -> InputEvent {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe {
+                libc::write(
+                    fds[1],
+                    encoded.as_ptr() as *const libc::c_void,
+                    encoded.len(),
+                )
+            },
+            encoded.len() as isize
+        );
+        unsafe { libc::close(fds[1]) };
+        let event = read_key(fds[0], Some(Duration::from_millis(100)));
+        unsafe { libc::close(fds[0]) };
+        event
+    }
+
+    #[test]
+    fn ctrl_c_and_ctrl_v_are_clipboard_shortcuts() {
+        assert_eq!(read_encoded_key(b"\x03"), InputEvent::Copy);
+        assert_eq!(read_encoded_key(b"\x16"), InputEvent::Paste);
+        assert_eq!(read_encoded_key(b"\x1b[99;5u"), InputEvent::Copy);
+        assert_eq!(read_encoded_key(b"\x1b[118;5u"), InputEvent::Paste);
+    }
+
+    #[test]
+    fn escape_still_exits() {
+        assert_eq!(read_encoded_key(b"\x1b"), InputEvent::Escape);
+        assert_eq!(read_encoded_key(b"\x1b[27u"), InputEvent::Escape);
     }
 }
