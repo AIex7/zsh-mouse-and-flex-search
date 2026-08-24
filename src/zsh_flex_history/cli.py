@@ -562,6 +562,8 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
             super_key = (mod - 1) & 8
 
             if codepoint == 13:
+                if alt:
+                    return "char", "\n"
                 return "enter", None
             if codepoint == 9:
                 return "tab", None
@@ -718,6 +720,8 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
             full = b"\x1b" + seq
             if full == b"\x1b":
                 return "escape", None
+            if full in (b"\x1b\r", b"\x1b\n"):
+                return "char", "\n"
             if full in (b"\x1b[A",):
                 return "up", None
             if full in (b"\x1b[B",):

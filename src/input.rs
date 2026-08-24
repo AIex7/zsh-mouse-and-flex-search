@@ -92,7 +92,11 @@ fn parse_csi_key(full: &[u8]) -> Option<InputEvent> {
             let super_key = (modifier.saturating_sub(1)) & 8 != 0;
 
             if codepoint == 13 {
-                return Some(InputEvent::Enter);
+                return Some(if alt {
+                    InputEvent::Char('\n')
+                } else {
+                    InputEvent::Enter
+                });
             }
             if codepoint == 9 {
                 return Some(InputEvent::Tab);
@@ -310,6 +314,9 @@ pub fn read_key(fd: RawFd, timeout: Option<Duration>) -> InputEvent {
             if full == b"\x1b" {
                 return InputEvent::Escape;
             }
+            if full == b"\x1b\r" || full == b"\x1b\n" {
+                return InputEvent::Char('\n');
+            }
             if full == b"\x1b[A" {
                 return InputEvent::Up;
             }
@@ -369,6 +376,46 @@ pub fn read_key(fd: RawFd, timeout: Option<Duration>) -> InputEvent {
                 return InputEvent::Char(burst.chars().next().unwrap_or(ch as char));
             }
             return InputEvent::Char(read_utf8_char(fd, ch));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kitty_alt_enter_inserts_newline() {
+        assert_eq!(parse_csi_key(b"\x1b[13;3u"), Some(InputEvent::Char('\n')));
+    }
+
+    #[test]
+    fn kitty_plain_enter_still_submits() {
+        assert_eq!(parse_csi_key(b"\x1b[13u"), Some(InputEvent::Enter));
+    }
+
+    #[test]
+    fn legacy_alt_enter_inserts_newline() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let encoded = b"\x1b\r";
+        assert_eq!(
+            unsafe {
+                libc::write(
+                    fds[1],
+                    encoded.as_ptr() as *const libc::c_void,
+                    encoded.len(),
+                )
+            },
+            encoded.len() as isize
+        );
+        assert_eq!(
+            read_key(fds[0], Some(Duration::from_millis(100))),
+            InputEvent::Char('\n')
+        );
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
         }
     }
 }
