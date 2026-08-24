@@ -51,7 +51,7 @@ pub fn run(
     let mut opened_tty_fd: Option<RawFd> = None;
 
     let cterm_path = unsafe {
-        let mut buf = [0i8; 1024];
+        let mut buf = [0 as libc::c_char; 1024];
         let ptr = ctermid(buf.as_mut_ptr());
         if !ptr.is_null() {
             std::ffi::CStr::from_ptr(ptr).to_str().unwrap_or("/dev/tty")
