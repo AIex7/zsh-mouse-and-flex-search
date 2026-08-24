@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use crate::layout::*;
 use crate::render::MatchResult;
 use crate::search::{
-    match_flex_metrics, pairwise_majority_scores, word_starts_with_ignoring_separators,
-    words_appear_in_order,
+    match_flex_metrics, normalized_flex_admission_score, pairwise_majority_scores,
+    word_starts_with_ignoring_separators, words_appear_in_order,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,13 +131,12 @@ fn top_ranked_directory_entries_bounded(
             }
         });
         flex_matches.sort_by(|left, right| {
-            right
-                .1
-                .longest_run
-                .cmp(&left.1.longest_run)
-                .then_with(|| right.1.adjacent_pairs.cmp(&left.1.adjacent_pairs))
-                .then_with(|| left.1.span.cmp(&right.1.span))
-                .then_with(|| left.1.candidate_len.cmp(&right.1.candidate_len))
+            normalized_flex_admission_score(right.1, query_chars.len(), None)
+                .cmp(&normalized_flex_admission_score(
+                    left.1,
+                    query_chars.len(),
+                    None,
+                ))
                 .then_with(|| left.4.cmp(&right.4))
         });
         flex_matches.truncate(flex_pool_limit);

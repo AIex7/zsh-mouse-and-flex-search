@@ -214,6 +214,43 @@ mod tests {
     }
 
     #[test]
+    fn normalized_admission_can_favor_balance_over_the_longest_run() {
+        let longer_run = FlexMetrics {
+            longest_run: 4,
+            adjacent_pairs: 3,
+            span: 10,
+            candidate_len: 11,
+        };
+        let balanced = FlexMetrics {
+            longest_run: 3,
+            adjacent_pairs: 4,
+            span: 7,
+            candidate_len: 8,
+        };
+
+        assert!(
+            normalized_flex_admission_score(balanced, 6, None)
+                > normalized_flex_admission_score(longer_run, 6, None)
+        );
+    }
+
+    #[test]
+    fn normalized_admission_gives_recency_one_bounded_component() {
+        let metrics = FlexMetrics {
+            longest_run: 3,
+            adjacent_pairs: 2,
+            span: 3,
+            candidate_len: 3,
+        };
+        let without_recency = normalized_flex_admission_score(metrics, 3, None);
+        let newest = normalized_flex_admission_score(metrics, 3, Some((0, 10)));
+        let oldest = normalized_flex_admission_score(metrics, 3, Some((9, 10)));
+
+        assert_eq!(newest - without_recency, 1_000_000);
+        assert_eq!(oldest, without_recency);
+    }
+
+    #[test]
     fn history_recency_casts_one_pairwise_vote() {
         let long_but_wide = FlexMetrics {
             longest_run: 4,
@@ -732,6 +769,33 @@ mod tests {
         );
 
         assert_eq!(ranked.iter().map(|item| item.0).collect::<Vec<_>>(), vec![2]);
+    }
+
+    #[test]
+    fn normalized_pool_admits_a_balanced_match_despite_a_shorter_run() {
+        let inputs = vec![
+            make_candidate_input("xabcxdef".to_string(), None, false).unwrap(),
+            make_candidate_input("xabcdxxexxf".to_string(), None, false).unwrap(),
+            make_candidate_input("yabcdyyeyyf".to_string(), None, false).unwrap(),
+        ];
+        let history = NativeHistory::new(inputs);
+        let query_words = vec!["abcdef".to_string()];
+
+        let (ranked, _) = history.search_ranked(
+            "abcdef",
+            "abcdef",
+            &query_words,
+            &query_words,
+            None,
+            None,
+            Some(1),
+            usize::MAX,
+        );
+
+        // The 2x pool has room for only two candidates. The old lexicographic
+        // rule retained both four-character runs; normalized admission keeps
+        // this tighter, shorter three-character-run match for the tournament.
+        assert_eq!(ranked.iter().map(|item| item.0).collect::<Vec<_>>(), vec![0]);
     }
 
     #[test]

@@ -776,17 +776,41 @@ pub struct RankedMatch {
     pub metrics: FlexMetrics,
 }
 
-fn preliminary_flex_key(
+const NORMALIZED_FLEX_SCALE: u64 = 1_000_000;
+
+fn normalized_ratio(numerator: usize, denominator: usize) -> u64 {
+    if denominator == 0 {
+        return NORMALIZED_FLEX_SCALE;
+    }
+    ((numerator.min(denominator) as u128 * NORMALIZED_FLEX_SCALE as u128)
+        / denominator as u128) as u64
+}
+
+pub fn normalized_flex_admission_score(
     metrics: FlexMetrics,
-    history_index: usize,
-) -> (usize, usize, Reverse<usize>, Reverse<usize>, Reverse<usize>) {
-    (
-        metrics.longest_run,
-        metrics.adjacent_pairs,
-        Reverse(metrics.span),
-        Reverse(metrics.candidate_len),
-        Reverse(history_index),
-    )
+    query_length: usize,
+    recency: Option<(usize, usize)>,
+) -> u64 {
+    let run_quality = normalized_ratio(metrics.longest_run, query_length);
+    let adjacency_quality = if query_length <= 1 {
+        NORMALIZED_FLEX_SCALE
+    } else {
+        normalized_ratio(metrics.adjacent_pairs, query_length - 1)
+    };
+    let continuity_quality = (run_quality + adjacency_quality) / 2;
+    let span_quality = normalized_ratio(query_length, metrics.span);
+    let length_quality = normalized_ratio(query_length, metrics.candidate_len);
+    let recency_quality = recency.map_or(0, |(history_index, history_length)| {
+        if history_length <= 1 {
+            NORMALIZED_FLEX_SCALE
+        } else {
+            normalized_ratio(
+                history_length - 1 - history_index.min(history_length - 1),
+                history_length - 1,
+            )
+        }
+    });
+    continuity_quality + span_quality + length_quality + recency_quality
 }
 
 pub fn pairwise_majority_scores(
@@ -846,10 +870,21 @@ fn bounded_pairwise_pool(
     mut matches: Vec<RankedMatch>,
     limit: usize,
     include_recency: bool,
+    query_length: usize,
+    history_length: usize,
 ) -> Vec<RankedMatch> {
     matches.sort_by(|left, right| {
-        preliminary_flex_key(right.metrics, right.index)
-            .cmp(&preliminary_flex_key(left.metrics, left.index))
+        normalized_flex_admission_score(
+            right.metrics,
+            query_length,
+            include_recency.then_some((right.index, history_length)),
+        )
+        .cmp(&normalized_flex_admission_score(
+            left.metrics,
+            query_length,
+            include_recency.then_some((left.index, history_length)),
+        ))
+        .then_with(|| left.index.cmp(&right.index))
     });
     matches.truncate(limit);
     pairwise_majority_order(&mut matches, include_recency);
@@ -1204,7 +1239,7 @@ impl NativeHistory {
 
         let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
         let mut scored_buckets_by_prefix: Vec<[
-            BinaryHeap<(Reverse<usize>, Reverse<usize>, usize, usize, usize, usize)>;
+            BinaryHeap<(Reverse<u64>, usize, usize, usize, usize, usize, usize)>;
             2
         ]> = Vec::new();
         let mut matched_indices = Some(Vec::new());
@@ -1416,33 +1451,34 @@ impl NativeHistory {
                     });
                 }
                 let heap = &mut scored_buckets_by_prefix[prefix_word_count][inner_bucket - 2];
+                let admission_score = normalized_flex_admission_score(
+                    metrics,
+                    query.len(),
+                    Some((index, self.candidates.len())),
+                );
                 let heap_entry = (
-                    Reverse(metrics.longest_run),
-                    Reverse(metrics.adjacent_pairs),
-                    metrics.span,
-                    metrics.candidate_len,
+                    Reverse(admission_score),
                     index,
                     scan_order,
+                    metrics.longest_run,
+                    metrics.adjacent_pairs,
+                    metrics.span,
+                    metrics.candidate_len,
                 );
                 if heap.len() < bucket_limit {
                     heap.push(heap_entry);
                 } else if let Some(&(
-                    Reverse(worst_longest_run),
-                    Reverse(worst_adjacent_pairs),
-                    worst_span,
-                    worst_candidate_len,
+                    Reverse(worst_admission_score),
                     worst_index,
+                    _,
+                    _,
+                    _,
+                    _,
                     _,
                 )) = heap.peek()
                 {
-                    let worst_metrics = FlexMetrics {
-                        longest_run: worst_longest_run,
-                        adjacent_pairs: worst_adjacent_pairs,
-                        span: worst_span,
-                        candidate_len: worst_candidate_len,
-                    };
-                    if preliminary_flex_key(metrics, index)
-                        > preliminary_flex_key(worst_metrics, worst_index)
+                    if (admission_score, Reverse(index))
+                        > (worst_admission_score, Reverse(worst_index))
                     {
                         heap.pop();
                         heap.push(heap_entry);
@@ -1500,12 +1536,13 @@ impl NativeHistory {
             {
                 for (flex_index, heap) in scored_buckets.iter_mut().enumerate() {
                     while let Some((
-                        Reverse(longest_run),
-                        Reverse(adjacent_pairs),
-                        span,
-                        candidate_len,
+                        _,
                         index,
                         scan_order,
+                        longest_run,
+                        adjacent_pairs,
+                        span,
+                        candidate_len,
                     )) = heap.pop()
                     {
                         buckets_by_prefix[prefix_count][flex_index + 2].push(RankedMatch {
@@ -1595,7 +1632,13 @@ impl NativeHistory {
                     lower_matches.extend(prefix_buckets[inner_bucket].iter().cloned());
                 }
                 let lower_matches =
-                    bounded_pairwise_pool(lower_matches, bucket_limit, true);
+                    bounded_pairwise_pool(
+                        lower_matches,
+                        bucket_limit,
+                        true,
+                        query.len(),
+                        self.candidates.len(),
+                    );
                 for matched in &lower_matches {
                     if select_match(matched) {
                         break 'remaining;
