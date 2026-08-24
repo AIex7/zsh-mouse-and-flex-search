@@ -1152,8 +1152,8 @@ impl NativeHistory {
                     })
                     .count()
             };
-            let words_in_order = if ordered_query_words.len() <= 1 {
-                true
+            let words_in_order = if ordered_query_words.is_empty() {
+                false
             } else if query_words_bigram_mask != 0 {
                 let has_bigram_match = self
                     .bigram_masks

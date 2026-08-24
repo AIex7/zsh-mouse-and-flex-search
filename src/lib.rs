@@ -493,4 +493,34 @@ mod tests {
         assert_eq!(ranked, vec![(1, 0)]);
         assert_eq!(matched_indices, Some(vec![1]));
     }
+
+    #[test]
+    fn contiguous_single_word_match_precedes_same_cwd_flex_match() {
+        let inputs = vec![
+            make_candidate_input("music_xmanifest".to_string(), Some("/repo".to_string()), false)
+                .unwrap(),
+            make_candidate_input(
+                "cd ~/Music && find . -type f | sort > ~/Desktop/music_manifest.txt".to_string(),
+                Some("/other".to_string()),
+                false,
+            )
+            .unwrap(),
+        ];
+        let history = NativeHistory::new(inputs);
+        let query_words = vec!["music_manifest".to_string()];
+        let current_cwd = history.cwd_interner.get("/repo").unwrap();
+
+        let (ranked, _) = history.search_ranked(
+            "music_manifest",
+            "music_manifest",
+            &query_words,
+            &query_words,
+            Some(current_cwd),
+            None,
+            Some(2),
+            usize::MAX,
+        );
+
+        assert_eq!(ranked, vec![(1, 0), (0, 0)]);
+    }
 }
