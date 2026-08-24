@@ -167,6 +167,96 @@ mod tests {
     }
 
     #[test]
+    fn flex_metrics_measure_runs_across_a_compacted_multiword_query() {
+        let query: Vec<char> = "gitcommit".chars().collect();
+        let separated = match_flex_metrics(&query, "git commit").unwrap();
+        let contiguous = match_flex_metrics(&query, "gitcommit").unwrap();
+
+        assert_eq!(
+            separated,
+            FlexMetrics {
+                longest_run: 6,
+                adjacent_pairs: 7,
+                span: 10,
+                candidate_len: 10,
+            }
+        );
+        assert_eq!(
+            contiguous,
+            FlexMetrics {
+                longest_run: 9,
+                adjacent_pairs: 8,
+                span: 9,
+                candidate_len: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn pairwise_majority_is_not_lexicographic() {
+        let longer_run = FlexMetrics {
+            longest_run: 4,
+            adjacent_pairs: 3,
+            span: 10,
+            candidate_len: 11,
+        };
+        let better_overall = FlexMetrics {
+            longest_run: 3,
+            adjacent_pairs: 4,
+            span: 7,
+            candidate_len: 8,
+        };
+
+        assert_eq!(
+            pairwise_majority_scores(&[longer_run, better_overall], None),
+            vec![-1, 1]
+        );
+    }
+
+    #[test]
+    fn history_recency_casts_one_pairwise_vote() {
+        let long_but_wide = FlexMetrics {
+            longest_run: 4,
+            adjacent_pairs: 3,
+            span: 20,
+            candidate_len: 20,
+        };
+        let short_but_split = FlexMetrics {
+            longest_run: 3,
+            adjacent_pairs: 2,
+            span: 6,
+            candidate_len: 6,
+        };
+
+        // With four quality metrics, each candidate wins two and the pair ties.
+        assert_eq!(
+            pairwise_majority_scores(&[long_but_wide, short_but_split], None),
+            vec![0, 0]
+        );
+        // Lower history indices are newer. Recency breaks the 2-2 tie, but is
+        // still only one vote rather than an overriding final tie-breaker.
+        assert_eq!(
+            pairwise_majority_scores(&[long_but_wide, short_but_split], Some(&[9, 2]),),
+            vec![-1, 1]
+        );
+    }
+
+    #[test]
+    fn identical_flex_quality_prefers_the_more_recent_history_entry() {
+        let metrics = FlexMetrics {
+            longest_run: 2,
+            adjacent_pairs: 1,
+            span: 4,
+            candidate_len: 8,
+        };
+
+        assert_eq!(
+            pairwise_majority_scores(&[metrics, metrics], Some(&[0, 5])),
+            vec![1, -1]
+        );
+    }
+
+    #[test]
     fn syntax_highlighter_tokens() {
         let mut hl = IncrementalHighlighter::new();
         let tokens = hl.highlight("if echo 'hello' | grep foo; then fi");
@@ -223,6 +313,26 @@ mod tests {
         assert_eq!(
             ranked.into_iter().map(|entry| entry.name).collect::<Vec<_>>(),
             vec!["zzabxc-long", "xxa-bx-c"]
+        );
+    }
+
+    #[test]
+    fn runtime_flex_ranking_uses_pairwise_majority() {
+        let entries = vec![
+            DirectoryListingEntry {
+                name: "xabcd-xe-xf".to_string(),
+                is_dir: false,
+            },
+            DirectoryListingEntry {
+                name: "xabc-def".to_string(),
+                is_dir: false,
+            },
+        ];
+
+        let ranked = top_ranked_directory_entries("abcdef", &entries);
+        assert_eq!(
+            ranked.into_iter().map(|entry| entry.name).collect::<Vec<_>>(),
+            vec!["xabc-def", "xabcd-xe-xf"]
         );
     }
 

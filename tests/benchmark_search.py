@@ -45,6 +45,10 @@ MAX_DAEMON_MESSAGE_BYTES = 64 * 1024 * 1024
 
 SIZES = (1_000, 5_000, 10_000, 20_000, 40_000, 60_000, 80_000, 100_000)
 FIXED_SEED = 20_260_817
+PURE_RANDOM_DATA_SEED = 20_260_824
+PURE_RANDOM_QUERY_SEED = 82_420_260
+PURE_RANDOM_QUERY_COUNT = 8
+PURE_RANDOM_QUERY_LETTERS = 8
 QUERIES = (
     "git st",
     "python -m",
@@ -352,6 +356,36 @@ def build_history(size: int, seed: int) -> list[HistoryEntry]:
     return [HistoryEntry(synthetic_command(index, rng)) for index in range(size)]
 
 
+def build_pure_random_history(size: int, seed: int) -> list[HistoryEntry]:
+    """Return deterministic commands containing only random non-space letters."""
+    rng = random.Random(seed + size)
+    return [
+        HistoryEntry(
+            "".join(
+                rng.choice(ascii_lowercase)
+                for _ in range(rng.randint(80, 240))
+            )
+        )
+        for _ in range(size)
+    ]
+
+
+def build_pure_random_queries(seed: int) -> tuple[str, ...]:
+    """Return deterministic random letters with exactly three inserted spaces."""
+    rng = random.Random(seed)
+    queries: list[str] = []
+    for _ in range(PURE_RANDOM_QUERY_COUNT):
+        letters = "".join(
+            rng.choice(ascii_lowercase)
+            for _ in range(PURE_RANDOM_QUERY_LETTERS)
+        )
+        boundaries = sorted(rng.sample(range(1, len(letters)), 3))
+        starts = (0, *boundaries)
+        ends = (*boundaries, len(letters))
+        queries.append(" ".join(letters[start:end] for start, end in zip(starts, ends)))
+    return tuple(queries)
+
+
 def repetitions_for(size: int) -> int:
     if size <= 10_000:
         return 7
@@ -416,7 +450,17 @@ def compare_fixed_snapshots(snapshot: dict[str, object], current_path: Path) -> 
         except (OSError, json.JSONDecodeError):
             differences.append(path)
             continue
-        if previous != snapshot:
+        # Snapshots created before the pure-random benchmark do not have that
+        # section. Continue comparing their original deterministic results;
+        # newer snapshots compare both sections.
+        comparable_snapshot = snapshot
+        if "pure_random" not in previous:
+            comparable_snapshot = {
+                key: value
+                for key, value in snapshot.items()
+                if key != "pure_random"
+            }
+        if previous != comparable_snapshot:
             differences.append(path)
     return sorted(differences)
 
@@ -443,6 +487,38 @@ def benchmark_run(label: str, seed: int) -> dict[str, object] | None:
             )
             if size == SNAPSHOT_SIZE:
                 snapshot = snapshot_results(size, native_candidates, seed)
+    return snapshot
+
+
+def benchmark_pure_random_run() -> dict[str, object] | None:
+    queries = build_pure_random_queries(PURE_RANDOM_QUERY_SEED)
+    print(f"\nPure random data seed: {PURE_RANDOM_DATA_SEED}")
+    print(f"Pure random query seed: {PURE_RANDOM_QUERY_SEED}")
+    print(f"Queries: {', '.join(queries)}")
+    print("entries  random-spaced ms/search  repetitions")
+    snapshot = None
+    for size in SIZES:
+        history = build_pure_random_history(size, PURE_RANDOM_DATA_SEED)
+        with RustSearchDaemon(history) as native_candidates:
+            repetitions = repetitions_for(size)
+            elapsed_ms, _ = benchmark(native_candidates, queries, repetitions)
+            print(f"{size:>7,}  {elapsed_ms:>23.2f}  {repetitions:>11}")
+            if size == SNAPSHOT_SIZE:
+                snapshot = {
+                    "data_seed": PURE_RANDOM_DATA_SEED,
+                    "query_seed": PURE_RANDOM_QUERY_SEED,
+                    "history_size": size,
+                    "queries": [
+                        {
+                            "query": query,
+                            "results": [
+                                item.text
+                                for item in benchmark_search(query, native_candidates)[0]
+                            ],
+                        }
+                        for query in queries
+                    ],
+                }
     return snapshot
 
 
@@ -518,6 +594,10 @@ def main() -> int:
     snapshot = benchmark_run("Fixed", FIXED_SEED)
     if snapshot is None:
         raise RuntimeError(f"SNAPSHOT_SIZE {SNAPSHOT_SIZE} is not present in SIZES")
+    pure_random_snapshot = benchmark_pure_random_run()
+    if pure_random_snapshot is None:
+        raise RuntimeError(f"SNAPSHOT_SIZE {SNAPSHOT_SIZE} is not present in SIZES")
+    snapshot["pure_random"] = pure_random_snapshot
     snapshot_path = write_fixed_snapshot(snapshot)
     differences = compare_fixed_snapshots(snapshot, snapshot_path)
     print(f"\nFixed ordered-results snapshot: {snapshot_path}")
