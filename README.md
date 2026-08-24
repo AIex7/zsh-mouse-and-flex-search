@@ -2,7 +2,7 @@
 
 ![zsh flex history screenshot](./demo.png)
 
-Use the mouse to edit commands in your terminal just like regular text, drag and select, overwrite by typing. Automatically search zsh history with directory aware fuzzy matching, and syntax highlighting. It runs on zsh hooks every time your prompt opens.
+Use the mouse to edit commands in your terminal just like regular text, drag and select, overwrite by typing. Automatically search zsh history with directory aware fuzzy matching, and syntax highlighting. It runs on zsh hooks every time your prompt opens. History is stored in sqlite, and the history search scales to millions of history entries thanks to Rust SIMD vectorization, compact bitmask filtering, and an in-memory caching daemon.  
 
 
 ## Install and Setup
