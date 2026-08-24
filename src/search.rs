@@ -38,6 +38,19 @@ pub fn compact_query(query_lower: &str) -> Vec<char> {
         .collect()
 }
 
+pub fn normalize_matching_words(words: Vec<String>) -> Vec<String> {
+    words
+        .into_iter()
+        .filter_map(|word| {
+            let normalized: String = word
+                .chars()
+                .filter(|character| !is_match_separator(*character))
+                .collect();
+            (!normalized.is_empty()).then_some(normalized)
+        })
+        .collect()
+}
+
 #[inline]
 pub fn is_match_separator(character: char) -> bool {
     matches!(character, '-' | '_')
@@ -122,48 +135,116 @@ pub fn find_byte_simd(slice: &[u8], target: u8) -> Option<usize> {
     }
 }
 
-pub fn match_flex_ascii(query: &[u8], _candidate: &[u8], candidate_lower: &[u8]) -> Option<i64> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlexMetrics {
+    pub longest_run: usize,
+    pub adjacent_pairs: usize,
+    pub span: usize,
+    pub candidate_len: usize,
+}
+
+pub fn match_flex_ascii_metrics(query: &[u8], candidate_lower: &[u8]) -> Option<FlexMetrics> {
     if query.is_empty() {
-        return Some(0);
+        return Some(FlexMetrics {
+            longest_run: 0,
+            adjacent_pairs: 0,
+            span: 0,
+            candidate_len: candidate_lower.len(),
+        });
     }
     let mut search_from = 0;
+    let mut first_match = 0;
+    let mut previous_match = None;
+    let mut adjacent_pairs = 0;
+    let mut current_run = 0;
+    let mut longest_run = 0;
     for &target in query {
         if search_from >= candidate_lower.len() {
             return None;
         }
-        if candidate_lower[search_from] == target {
-            search_from += 1;
+        let matched_at = if candidate_lower[search_from] == target {
+            search_from
         } else {
-            search_from += find_byte_simd(&candidate_lower[search_from..], target)? + 1;
+            search_from + find_byte_simd(&candidate_lower[search_from..], target)?
+        };
+        if let Some(previous) = previous_match {
+            if matched_at == previous + 1 {
+                adjacent_pairs += 1;
+                current_run += 1;
+            } else {
+                current_run = 1;
+            }
+        } else {
+            first_match = matched_at;
+            current_run = 1;
         }
+        longest_run = longest_run.max(current_run);
+        previous_match = Some(matched_at);
+        search_from = matched_at + 1;
     }
-    Some(0)
+    let last_match = previous_match?;
+    Some(FlexMetrics {
+        longest_run,
+        adjacent_pairs,
+        span: last_match - first_match + 1,
+        candidate_len: candidate_lower.len(),
+    })
 }
 
-pub fn match_flex(query: &[char], _candidate: &str, candidate_lower: &str) -> Option<i64> {
+pub fn match_flex_metrics(query: &[char], candidate_lower: &str) -> Option<FlexMetrics> {
     if candidate_lower.is_ascii() {
         if let Some(query_ascii) = ascii_query(query) {
-            return match_flex_ascii(
-                &query_ascii,
-                candidate_lower.as_bytes(),
-                candidate_lower.as_bytes(),
-            );
+            return match_flex_ascii_metrics(&query_ascii, candidate_lower.as_bytes());
         }
     }
     if query.is_empty() {
-        return Some(0);
+        return Some(FlexMetrics {
+            longest_run: 0,
+            adjacent_pairs: 0,
+            span: 0,
+            candidate_len: candidate_lower.chars().count(),
+        });
     }
 
     let mut query_index = 0;
-    for candidate_character in candidate_lower.chars() {
+    let mut first_match = 0;
+    let mut previous_match = None;
+    let mut adjacent_pairs = 0;
+    let mut current_run = 0;
+    let mut longest_run = 0;
+    let mut candidate_characters = candidate_lower.chars().enumerate();
+    while let Some((candidate_index, candidate_character)) = candidate_characters.next() {
         if candidate_character == query[query_index] {
+            if let Some(previous) = previous_match {
+                if candidate_index == previous + 1 {
+                    adjacent_pairs += 1;
+                    current_run += 1;
+                } else {
+                    current_run = 1;
+                }
+            } else {
+                first_match = candidate_index;
+                current_run = 1;
+            }
+            longest_run = longest_run.max(current_run);
+            previous_match = Some(candidate_index);
             query_index += 1;
             if query_index == query.len() {
-                return Some(0);
+                let candidate_len = candidate_index + 1 + candidate_characters.count();
+                return Some(FlexMetrics {
+                    longest_run,
+                    adjacent_pairs,
+                    span: candidate_index - first_match + 1,
+                    candidate_len,
+                });
             }
         }
     }
     None
+}
+
+pub fn match_flex(query: &[char], _candidate: &str, candidate_lower: &str) -> Option<i64> {
+    match_flex_metrics(query, candidate_lower).map(|_| 0)
 }
 
 #[inline(always)]
@@ -599,29 +680,17 @@ impl NativeCandidate {
         self.word(0)
     }
 
-    pub fn match_flex_score(&self, query: &[char], query_ascii: Option<&[u8]>) -> Option<i64> {
+    pub fn match_flex_metrics(
+        &self,
+        query: &[char],
+        query_ascii: Option<&[u8]>,
+    ) -> Option<FlexMetrics> {
         if self.ascii {
             if let Some(query_ascii) = query_ascii {
-                return match_flex_ascii(
-                    query_ascii,
-                    self.text.as_bytes(),
-                    self.text_lower().as_bytes(),
-                );
+                return match_flex_ascii_metrics(query_ascii, self.text_lower().as_bytes());
             }
         }
-        if query.is_empty() {
-            return Some(0);
-        }
-        let mut query_index = 0;
-        for candidate_character in self.text_lower().chars() {
-            if candidate_character == query[query_index] {
-                query_index += 1;
-                if query_index == query.len() {
-                    return Some(0);
-                }
-            }
-        }
-        None
+        match_flex_metrics(query, self.text_lower())
     }
 }
 
@@ -699,10 +768,92 @@ impl DaemonQueryCache {
 
 pub type CandidateInput = (String, String, Option<String>, Vec<String>, bool);
 
+#[derive(Clone)]
 pub struct RankedMatch {
     pub index: usize,
     pub score: i64,
     pub scan_order: usize,
+    pub metrics: FlexMetrics,
+}
+
+fn preliminary_flex_key(
+    metrics: FlexMetrics,
+    history_index: usize,
+) -> (usize, usize, Reverse<usize>, Reverse<usize>, Reverse<usize>) {
+    (
+        metrics.longest_run,
+        metrics.adjacent_pairs,
+        Reverse(metrics.span),
+        Reverse(metrics.candidate_len),
+        Reverse(history_index),
+    )
+}
+
+pub fn pairwise_majority_scores(
+    metrics: &[FlexMetrics],
+    recency_indices: Option<&[usize]>,
+) -> Vec<i64> {
+    let mut tournament_scores = vec![0_i64; metrics.len()];
+    for left in 0..metrics.len() {
+        for right in left + 1..metrics.len() {
+            let a = metrics[left];
+            let b = metrics[right];
+            let mut a_votes = 0;
+            let mut b_votes = 0;
+            let mut vote = |ordering: std::cmp::Ordering| match ordering {
+                std::cmp::Ordering::Greater => a_votes += 1,
+                std::cmp::Ordering::Less => b_votes += 1,
+                std::cmp::Ordering::Equal => {}
+            };
+            vote(a.longest_run.cmp(&b.longest_run));
+            vote(a.adjacent_pairs.cmp(&b.adjacent_pairs));
+            vote(b.span.cmp(&a.span));
+            vote(b.candidate_len.cmp(&a.candidate_len));
+            if let Some(indices) = recency_indices {
+                vote(indices[right].cmp(&indices[left]));
+            }
+            if a_votes > b_votes {
+                tournament_scores[left] += 1;
+                tournament_scores[right] -= 1;
+            } else if b_votes > a_votes {
+                tournament_scores[left] -= 1;
+                tournament_scores[right] += 1;
+            }
+        }
+    }
+    tournament_scores
+}
+
+fn pairwise_majority_order(matches: &mut [RankedMatch], include_recency: bool) {
+    let metrics: Vec<FlexMetrics> = matches.iter().map(|matched| matched.metrics).collect();
+    let recency_indices: Vec<usize> = matches.iter().map(|matched| matched.index).collect();
+    let tournament_scores = pairwise_majority_scores(
+        &metrics,
+        include_recency.then_some(recency_indices.as_slice()),
+    );
+    for (matched, score) in matches.iter_mut().zip(tournament_scores) {
+        matched.score = score;
+    }
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.scan_order.cmp(&right.scan_order))
+    });
+}
+
+fn bounded_pairwise_pool(
+    mut matches: Vec<RankedMatch>,
+    limit: usize,
+    include_recency: bool,
+) -> Vec<RankedMatch> {
+    matches.sort_by(|left, right| {
+        preliminary_flex_key(right.metrics, right.index)
+            .cmp(&preliminary_flex_key(left.metrics, left.index))
+    });
+    matches.truncate(limit);
+    pairwise_majority_order(&mut matches, include_recency);
+    matches
 }
 
 pub fn word_starts_with_ignoring_separators(word: &str, prefix: &str) -> bool {
@@ -920,10 +1071,11 @@ impl NativeHistory {
                     continue;
                 }
                 if let Some(candidate) = self.candidates.get(index) {
-                    if let Some(score) =
-                        candidate.match_flex_score(&query, query_ascii.as_deref())
+                    if candidate
+                        .match_flex_metrics(&query, query_ascii.as_deref())
+                        .is_some()
                     {
-                        matches.push((index, score));
+                        matches.push((index, 0));
                     }
                 }
             }
@@ -931,10 +1083,11 @@ impl NativeHistory {
             let (slice1, slice2) = self.char_masks.as_slices();
             let mut check = |index: usize| -> bool {
                 if let Some(candidate) = self.candidates.get(index) {
-                    if let Some(score) =
-                        candidate.match_flex_score(&query, query_ascii.as_deref())
+                    if candidate
+                        .match_flex_metrics(&query, query_ascii.as_deref())
+                        .is_some()
                     {
-                        matches.push((index, score));
+                        matches.push((index, 0));
                     }
                 }
                 true
@@ -1015,11 +1168,10 @@ impl NativeHistory {
         limit: Option<usize>,
         max_returned_indices: usize,
     ) -> (Vec<(usize, i64)>, Option<Vec<usize>>) {
-        if query_lower.is_empty() {
+        let query = compact_query(query_lower);
+        if query.is_empty() {
             return self.search_empty_ranked(candidate_indices, limit, current_cwd);
         }
-
-        let query = compact_query(query_lower);
         let query_ascii = ascii_query(&query);
         let query_mask = compute_query_char_mask(&query);
         let query_words_bigram_mask = if ordered_query_words.len() > 1 {
@@ -1051,6 +1203,10 @@ impl NativeHistory {
             .min(self.candidates.len());
 
         let mut buckets_by_prefix: Vec<[Vec<RankedMatch>; 4]> = Vec::new();
+        let mut scored_buckets_by_prefix: Vec<[
+            BinaryHeap<(Reverse<usize>, Reverse<usize>, usize, usize, usize, usize)>;
+            2
+        ]> = Vec::new();
         let mut matched_indices = Some(Vec::new());
         let mut preferred_collected = 0;
         let mut ranking_completed = false;
@@ -1065,7 +1221,7 @@ impl NativeHistory {
                     && query_ascii.is_some()
                     && !candidate.ascii
                     && candidate
-                        .match_flex_score(&query, query_ascii.as_deref())
+                        .match_flex_metrics(&query, query_ascii.as_deref())
                         .is_none()
                 {
                     return true;
@@ -1088,15 +1244,8 @@ impl NativeHistory {
             let Some(candidate) = self.candidates.get(index) else {
                 return true;
             };
-            let is_single_ascii =
-                single_char_query && query_ascii.is_some() && candidate.ascii;
-            let score = if is_single_ascii {
-                0
-            } else {
-                let Some(score) = candidate.match_flex_score(&query, query_ascii.as_deref()) else {
-                    return true;
-                };
-                score
+            let Some(metrics) = candidate.match_flex_metrics(&query, query_ascii.as_deref()) else {
+                return true;
             };
             if !normalized_query.is_empty() && candidate.normalized_text() == normalized_query {
                 return true;
@@ -1137,8 +1286,9 @@ impl NativeHistory {
                     }
                     bucket.push(RankedMatch {
                         index,
-                        score,
+                        score: 0,
                         scan_order,
+                        metrics,
                     });
                 }
 
@@ -1146,7 +1296,7 @@ impl NativeHistory {
                     if current_cwd.is_none() {
                         if seen_preferred.insert(candidate.text.as_str()) {
                             preferred_collected += 1;
-                            if preferred_collected >= result_limit {
+                            if preferred_collected >= bucket_limit {
                                 ranking_completed = true;
                             }
                         }
@@ -1154,7 +1304,7 @@ impl NativeHistory {
                         && seen_preferred.insert(candidate.text.as_str())
                     {
                         preferred_collected += 1;
-                        if preferred_collected >= result_limit {
+                        if preferred_collected >= bucket_limit {
                             ranking_completed = true;
                         }
                     }
@@ -1249,26 +1399,69 @@ impl NativeHistory {
                     std::array::from_fn(|_| Vec::new())
                 });
             }
-            if buckets_by_prefix[prefix_word_count][inner_bucket].len() < bucket_limit {
+            if inner_bucket < 2 {
+                if buckets_by_prefix[prefix_word_count][inner_bucket].len() >= bucket_limit {
+                    return true;
+                }
                 buckets_by_prefix[prefix_word_count][inner_bucket].push(RankedMatch {
                     index,
-                    score,
+                    score: 0,
                     scan_order,
+                    metrics,
                 });
+            } else {
+                if scored_buckets_by_prefix.len() <= prefix_word_count {
+                    scored_buckets_by_prefix.resize_with(prefix_word_count + 1, || {
+                        std::array::from_fn(|_| BinaryHeap::new())
+                    });
+                }
+                let heap = &mut scored_buckets_by_prefix[prefix_word_count][inner_bucket - 2];
+                let heap_entry = (
+                    Reverse(metrics.longest_run),
+                    Reverse(metrics.adjacent_pairs),
+                    metrics.span,
+                    metrics.candidate_len,
+                    index,
+                    scan_order,
+                );
+                if heap.len() < bucket_limit {
+                    heap.push(heap_entry);
+                } else if let Some(&(
+                    Reverse(worst_longest_run),
+                    Reverse(worst_adjacent_pairs),
+                    worst_span,
+                    worst_candidate_len,
+                    worst_index,
+                    _,
+                )) = heap.peek()
+                {
+                    let worst_metrics = FlexMetrics {
+                        longest_run: worst_longest_run,
+                        adjacent_pairs: worst_adjacent_pairs,
+                        span: worst_span,
+                        candidate_len: worst_candidate_len,
+                    };
+                    if preliminary_flex_key(metrics, index)
+                        > preliminary_flex_key(worst_metrics, worst_index)
+                    {
+                        heap.pop();
+                        heap.push(heap_entry);
+                    }
+                }
             }
 
             if single_char_query && prefix_word_count == 1 {
                 if current_cwd.is_none() {
                     if seen_preferred.insert(candidate.text.as_str()) {
                         preferred_collected += 1;
-                        if preferred_collected >= result_limit {
+                        if preferred_collected >= bucket_limit {
                             ranking_completed = true;
                         }
                     }
                 } else if inner_bucket == 0 {
                     if seen_preferred.insert(candidate.text.as_str()) {
                         preferred_collected += 1;
-                        if preferred_collected >= result_limit {
+                        if preferred_collected >= bucket_limit {
                             ranking_completed = true;
                         }
                     }
@@ -1301,6 +1494,41 @@ impl NativeHistory {
             }
         }
 
+        if !bounded_single_ascii_query {
+            for (prefix_count, scored_buckets) in
+                scored_buckets_by_prefix.iter_mut().enumerate()
+            {
+                for (flex_index, heap) in scored_buckets.iter_mut().enumerate() {
+                    while let Some((
+                        Reverse(longest_run),
+                        Reverse(adjacent_pairs),
+                        span,
+                        candidate_len,
+                        index,
+                        scan_order,
+                    )) = heap.pop()
+                    {
+                        buckets_by_prefix[prefix_count][flex_index + 2].push(RankedMatch {
+                            index,
+                            score: 0,
+                            scan_order,
+                            metrics: FlexMetrics {
+                                longest_run,
+                                adjacent_pairs,
+                                span,
+                                candidate_len,
+                            },
+                        });
+                    }
+                }
+            }
+            for prefix_buckets in &mut buckets_by_prefix {
+                for bucket in &mut prefix_buckets[2..] {
+                    pairwise_majority_order(bucket, true);
+                }
+            }
+        }
+
         let mut selected = Vec::with_capacity(result_limit.min(self.candidates.len()));
         let mut seen = HashSet::new();
         let mut select_match = |matched: &RankedMatch| -> bool {
@@ -1329,30 +1557,48 @@ impl NativeHistory {
 
         if !selection_complete && max_prefix_word_count > 0 {
             'remaining: for inner_bucket in 0..4 {
-                let mut heap = BinaryHeap::new();
-                for (prefix_count, prefix_buckets) in buckets_by_prefix
-                    .iter()
-                    .enumerate()
-                    .take(max_prefix_word_count)
-                {
-                    if let Some(matched) = prefix_buckets[inner_bucket].first() {
-                        heap.push(Reverse((matched.scan_order, prefix_count, 0_usize)));
+                if inner_bucket < 2 || bounded_single_ascii_query {
+                    let mut heap = BinaryHeap::new();
+                    for (prefix_count, prefix_buckets) in buckets_by_prefix
+                        .iter()
+                        .enumerate()
+                        .take(max_prefix_word_count)
+                    {
+                        if let Some(matched) = prefix_buckets[inner_bucket].first() {
+                            heap.push(Reverse((matched.scan_order, prefix_count, 0_usize)));
+                        }
                     }
+
+                    while let Some(Reverse((_, prefix_count, position))) = heap.pop() {
+                        let bucket = &buckets_by_prefix[prefix_count][inner_bucket];
+                        let matched = &bucket[position];
+                        if select_match(matched) {
+                            break 'remaining;
+                        }
+                        let next_position = position + 1;
+                        if let Some(next) = bucket.get(next_position) {
+                            heap.push(Reverse((
+                                next.scan_order,
+                                prefix_count,
+                                next_position,
+                            )));
+                        }
+                    }
+                    continue;
                 }
 
-                while let Some(Reverse((_, prefix_count, position))) = heap.pop() {
-                    let bucket = &buckets_by_prefix[prefix_count][inner_bucket];
-                    let matched = &bucket[position];
+                let mut lower_matches = Vec::new();
+                for prefix_buckets in buckets_by_prefix
+                    .iter()
+                    .take(max_prefix_word_count)
+                {
+                    lower_matches.extend(prefix_buckets[inner_bucket].iter().cloned());
+                }
+                let lower_matches =
+                    bounded_pairwise_pool(lower_matches, bucket_limit, true);
+                for matched in &lower_matches {
                     if select_match(matched) {
                         break 'remaining;
-                    }
-                    let next_position = position + 1;
-                    if let Some(next) = bucket.get(next_position) {
-                        heap.push(Reverse((
-                            next.scan_order,
-                            prefix_count,
-                            next_position,
-                        )));
                     }
                 }
             }

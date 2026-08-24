@@ -11,7 +11,7 @@ use rusqlite::OptionalExtension;
 use crate::db::*;
 use crate::layout::shell_words_for_matching;
 use crate::protocol::*;
-use crate::search::{CandidateInput, NativeHistory};
+use crate::search::{normalize_matching_words, CandidateInput, NativeHistory};
 
 type CustomHistoryRefreshRow = (i64, String, String, String, i64);
 
@@ -261,8 +261,14 @@ impl DaemonHistoryState {
         current_cwd: Option<&str>,
     ) -> Result<Vec<u8>, &'static str> {
         let normalized_query = query.trim().to_lowercase();
-        let prefix_words = shell_words_for_matching(query);
-        let ordered_words: Vec<String> = query.to_lowercase().split_whitespace().map(|s| s.to_string()).collect();
+        let prefix_words = normalize_matching_words(shell_words_for_matching(query));
+        let ordered_words = normalize_matching_words(
+            query
+                .to_lowercase()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        );
         let cwd_arc = current_cwd.and_then(|cwd| self.native_candidates.cwd_interner.get(cwd).cloned());
 
         if candidate_indices.is_some() {

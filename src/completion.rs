@@ -5,7 +5,10 @@ use std::sync::Mutex;
 
 use crate::layout::*;
 use crate::render::MatchResult;
-use crate::search::match_flex;
+use crate::search::{
+    match_flex_metrics, pairwise_majority_scores, word_starts_with_ignoring_separators,
+    words_appear_in_order,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryListingEntry {
@@ -72,31 +75,33 @@ pub fn top_ranked_directory_entries(
     query: &str,
     entries: &[DirectoryListingEntry],
 ) -> Vec<DirectoryListingEntry> {
+    top_ranked_directory_entries_bounded(query, entries, usize::MAX)
+}
+
+fn top_ranked_directory_entries_bounded(
+    query: &str,
+    entries: &[DirectoryListingEntry],
+    flex_pool_limit: usize,
+) -> Vec<DirectoryListingEntry> {
     let query_lower = query.to_lowercase();
     let query_chars: Vec<char> = query_lower.chars().filter(|c| !c.is_whitespace()).collect();
-    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+    let query_words: Vec<String> = query_lower.split_whitespace().map(str::to_string).collect();
     let mut ranked = Vec::new();
 
     for entry in entries {
         let entry_lower = entry.name.to_lowercase();
-        if let Some(score) = match_flex(&query_chars, &entry.name, &entry_lower) {
+        if let Some(metrics) = match_flex_metrics(&query_chars, &entry_lower) {
             let entry_words: Vec<&str> = entry_lower.split_whitespace().collect();
             let prefix_match = !query_words.is_empty()
                 && query_words.len() <= entry_words.len()
                 && query_words
                     .iter()
                     .zip(&entry_words)
-                    .all(|(query_word, entry_word)| entry_word.starts_with(query_word));
-            let words_in_order = query_words.len() > 1 && {
-                let mut remaining = entry_lower.as_str();
-                query_words.iter().all(|query_word| {
-                    let Some(position) = remaining.find(query_word) else {
-                        return false;
-                    };
-                    remaining = &remaining[position + query_word.len()..];
-                    true
-                })
-            };
+                    .all(|(query_word, entry_word)| {
+                        word_starts_with_ignoring_separators(entry_word, query_word)
+                    });
+            let words_in_order =
+                !query_words.is_empty() && words_appear_in_order(&query_words, &entry_lower);
             let rank_group = if prefix_match {
                 0
             } else if words_in_order {
@@ -104,20 +109,70 @@ pub fn top_ranked_directory_entries(
             } else {
                 2
             };
-            ranked.push((entry.clone(), score, rank_group, entry_lower.chars().count(), entry_lower));
+            ranked.push((
+                entry.clone(),
+                metrics,
+                rank_group,
+                entry_lower.chars().count(),
+                entry_lower,
+                0_i64,
+            ));
         }
+    }
+
+    if flex_pool_limit < usize::MAX {
+        let mut flex_matches = Vec::new();
+        ranked.retain(|item| {
+            if item.2 == 2 {
+                flex_matches.push(item.clone());
+                false
+            } else {
+                true
+            }
+        });
+        flex_matches.sort_by(|left, right| {
+            right
+                .1
+                .longest_run
+                .cmp(&left.1.longest_run)
+                .then_with(|| right.1.adjacent_pairs.cmp(&left.1.adjacent_pairs))
+                .then_with(|| left.1.span.cmp(&right.1.span))
+                .then_with(|| left.1.candidate_len.cmp(&right.1.candidate_len))
+                .then_with(|| left.4.cmp(&right.4))
+        });
+        flex_matches.truncate(flex_pool_limit);
+        ranked.extend(flex_matches);
+    }
+
+    let flex_positions: Vec<usize> = ranked
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| (item.2 == 2).then_some(index))
+        .collect();
+    let flex_metrics: Vec<_> = flex_positions.iter().map(|&index| ranked[index].1).collect();
+    for (&index, score) in flex_positions
+        .iter()
+        .zip(pairwise_majority_scores(&flex_metrics, None))
+    {
+        ranked[index].5 = score;
     }
 
     ranked.sort_by(|a, b| {
         a.2.cmp(&b.2)
+            .then_with(|| {
+                if a.2 == 2 {
+                    b.5.cmp(&a.5)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
             .then_with(|| a.3.cmp(&b.3))
             .then_with(|| a.4.cmp(&b.4))
-            .then_with(|| b.1.cmp(&a.1))
             .then_with(|| a.0.name.cmp(&b.0.name))
     });
     ranked
         .into_iter()
-        .map(|(entry, _, _, _, _)| entry)
+        .map(|(entry, _, _, _, _, _)| entry)
         .collect()
 }
 
@@ -251,7 +306,11 @@ pub fn runtime_completion_matches(
             .filter(|e| !e.name.starts_with('.') || name_prefix.starts_with('.'))
             .collect();
 
-        chosen_entries = top_ranked_directory_entries(name_prefix, &visible);
+        chosen_entries = top_ranked_directory_entries_bounded(
+            name_prefix,
+            &visible,
+            limit.saturating_mul(2),
+        );
 
         if display_prefix.is_empty() {
             completed_prefix.clear();

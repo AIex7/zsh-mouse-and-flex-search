@@ -153,6 +153,20 @@ mod tests {
     }
 
     #[test]
+    fn flex_metrics_and_majority_reward_continuity_and_shorter_candidates() {
+        let query: Vec<char> = "abc".chars().collect();
+        let contiguous = match_flex_metrics(&query, "abc-long").unwrap();
+        let gapped = match_flex_metrics(&query, "a-b-c").unwrap();
+        let short = match_flex_metrics(&query, "abc").unwrap();
+        let scores = pairwise_majority_scores(&[contiguous, gapped, short], None);
+
+        assert_eq!(contiguous.longest_run, 3);
+        assert_eq!(gapped.longest_run, 1);
+        assert!(scores[2] > scores[0]);
+        assert!(scores[0] > scores[1]);
+    }
+
+    #[test]
     fn syntax_highlighter_tokens() {
         let mut hl = IncrementalHighlighter::new();
         let tokens = hl.highlight("if echo 'hello' | grep foo; then fi");
@@ -199,6 +213,16 @@ mod tests {
         assert_eq!(
             ranked.into_iter().map(|entry| entry.name).collect::<Vec<_>>(),
             vec!["music folder", "archive music folder", "museum_file_old"]
+        );
+
+        let flex_entries = vec![
+            DirectoryListingEntry { name: "xxa-bx-c".to_string(), is_dir: false },
+            DirectoryListingEntry { name: "zzabxc-long".to_string(), is_dir: false },
+        ];
+        let ranked = top_ranked_directory_entries("abc", &flex_entries);
+        assert_eq!(
+            ranked.into_iter().map(|entry| entry.name).collect::<Vec<_>>(),
+            vec!["zzabxc-long", "xxa-bx-c"]
         );
     }
 
@@ -490,7 +514,8 @@ mod tests {
             usize::MAX,
         );
 
-        assert_eq!(ranked, vec![(1, 0)]);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].0, 1);
         assert_eq!(matched_indices, Some(vec![1]));
     }
 
@@ -521,7 +546,82 @@ mod tests {
             usize::MAX,
         );
 
-        assert_eq!(ranked, vec![(1, 0), (0, 0)]);
+        assert_eq!(ranked.iter().map(|item| item.0).collect::<Vec<_>>(), vec![1, 0]);
+    }
+
+    #[test]
+    fn history_uses_pairwise_majority_only_within_a_flex_bucket() {
+        let inputs = vec![
+            make_candidate_input("axbxc".to_string(), None, false).unwrap(),
+            make_candidate_input("abxc-long".to_string(), None, false).unwrap(),
+            make_candidate_input("abxc-newest-tie".to_string(), None, false).unwrap(),
+            make_candidate_input("abxc-oldest-tie".to_string(), None, false).unwrap(),
+        ];
+        let history = NativeHistory::new(inputs);
+        let query_words = vec!["abc".to_string()];
+
+        let (ranked, _) = history.search_ranked(
+            "abc",
+            "abc",
+            &query_words,
+            &query_words,
+            None,
+            None,
+            Some(4),
+            usize::MAX,
+        );
+
+        assert_eq!(ranked[0].0, 1);
+        assert_eq!(ranked[1].0, 2);
+        assert_eq!(ranked[2].0, 3);
+        assert_eq!(ranked[3].0, 0);
+    }
+
+    #[test]
+    fn words_in_order_bucket_preserves_recency_instead_of_pairwise_ranking() {
+        let inputs = vec![
+            make_candidate_input("ab-very-very-long".to_string(), None, false).unwrap(),
+            make_candidate_input("abx".to_string(), None, false).unwrap(),
+        ];
+        let history = NativeHistory::new(inputs);
+        let query_words = vec!["ab".to_string()];
+
+        let (ranked, _) = history.search_ranked(
+            "ab",
+            "ab",
+            &query_words,
+            &query_words,
+            None,
+            None,
+            Some(2),
+            usize::MAX,
+        );
+
+        assert_eq!(ranked.iter().map(|item| item.0).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test]
+    fn flex_heap_keeps_a_better_match_found_after_the_overscan_cap() {
+        let inputs = vec![
+            make_candidate_input("axbxc-newest".to_string(), None, false).unwrap(),
+            make_candidate_input("aybyc-recent".to_string(), None, false).unwrap(),
+            make_candidate_input("abxc-older".to_string(), None, false).unwrap(),
+        ];
+        let history = NativeHistory::new(inputs);
+        let query_words = vec!["abc".to_string()];
+
+        let (ranked, _) = history.search_ranked(
+            "abc",
+            "abc",
+            &query_words,
+            &query_words,
+            None,
+            None,
+            Some(1),
+            usize::MAX,
+        );
+
+        assert_eq!(ranked.iter().map(|item| item.0).collect::<Vec<_>>(), vec![2]);
     }
 
     #[test]
@@ -542,5 +642,57 @@ mod tests {
             &["onetwo".to_string()],
             "echo one x two"
         ));
+    }
+
+    #[test]
+    fn separator_only_query_words_do_not_change_history_buckets() {
+        let words_for = |query: &str| {
+            (
+                normalize_matching_words(shell_words_for_matching(query)),
+                normalize_matching_words(
+                    query
+                        .to_lowercase()
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            )
+        };
+        let inputs = vec![
+            make_candidate_input(
+                "git commit -am \"made -_ ignored in searching\"".to_string(),
+                None,
+                false,
+            )
+            .unwrap(),
+            make_candidate_input(
+                "git commit -am \"fixed contiguous word priority\"".to_string(),
+                None,
+                false,
+            )
+            .unwrap(),
+            make_candidate_input("git commit -am \"updated demo image\"".to_string(), None, false)
+                .unwrap(),
+        ];
+        let history = NativeHistory::new(inputs);
+        let run = |query: &str| {
+            let (prefix_words, ordered_words) = words_for(query);
+            history
+                .search_ranked(
+                    query,
+                    query.trim(),
+                    &prefix_words,
+                    &ordered_words,
+                    None,
+                    None,
+                    Some(3),
+                    usize::MAX,
+                )
+                .0
+        };
+
+        assert_eq!(run("git commit"), run("git commit -"));
+        assert_eq!(run("git commit am"), run("git commit -am"));
+        assert_eq!(run(""), run("-"));
     }
 }
