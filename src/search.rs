@@ -698,6 +698,7 @@ pub struct NativeHistory {
     pub char_masks: VecDeque<u128>,
     pub bigram_masks: VecDeque<u64>,
     pub candidates: VecDeque<NativeCandidate>,
+    normalized_recency: Vec<u32>,
     pub cwd_interner: HashSet<Arc<str>>,
     pub daemon_query_cache: Mutex<DaemonQueryCache>,
 }
@@ -782,14 +783,19 @@ fn normalized_ratio(numerator: usize, denominator: usize) -> u64 {
     if denominator == 0 {
         return NORMALIZED_FLEX_SCALE;
     }
-    ((numerator.min(denominator) as u128 * NORMALIZED_FLEX_SCALE as u128)
-        / denominator as u128) as u64
+    let numerator = numerator.min(denominator) as u64;
+    let denominator = denominator as u64;
+    if denominator <= u64::MAX / NORMALIZED_FLEX_SCALE {
+        numerator * NORMALIZED_FLEX_SCALE / denominator
+    } else {
+        ((numerator as u128 * NORMALIZED_FLEX_SCALE as u128) / denominator as u128) as u64
+    }
 }
 
 pub fn normalized_flex_admission_score(
     metrics: FlexMetrics,
     query_length: usize,
-    recency: Option<(usize, usize)>,
+    recency_quality: Option<u64>,
 ) -> u64 {
     let run_quality = normalized_ratio(metrics.longest_run, query_length);
     let adjacency_quality = if query_length <= 1 {
@@ -800,17 +806,21 @@ pub fn normalized_flex_admission_score(
     let continuity_quality = (run_quality + adjacency_quality) / 2;
     let span_quality = normalized_ratio(query_length, metrics.span);
     let length_quality = normalized_ratio(query_length, metrics.candidate_len);
-    let recency_quality = recency.map_or(0, |(history_index, history_length)| {
-        if history_length <= 1 {
-            NORMALIZED_FLEX_SCALE
-        } else {
-            normalized_ratio(
-                history_length - 1 - history_index.min(history_length - 1),
-                history_length - 1,
-            )
-        }
-    });
-    continuity_quality + span_quality + length_quality + recency_quality
+    continuity_quality + span_quality + length_quality + recency_quality.unwrap_or(0)
+}
+
+fn build_normalized_recency(history_length: usize) -> Vec<u32> {
+    if history_length == 0 {
+        return Vec::new();
+    }
+    if history_length == 1 {
+        return vec![NORMALIZED_FLEX_SCALE as u32];
+    }
+    (0..history_length)
+        .map(|history_index| {
+            normalized_ratio(history_length - 1 - history_index, history_length - 1) as u32
+        })
+        .collect()
 }
 
 pub fn pairwise_majority_scores(
@@ -871,18 +881,18 @@ fn bounded_pairwise_pool(
     limit: usize,
     include_recency: bool,
     query_length: usize,
-    history_length: usize,
+    normalized_recency: &[u32],
 ) -> Vec<RankedMatch> {
     matches.sort_by(|left, right| {
         normalized_flex_admission_score(
             right.metrics,
             query_length,
-            include_recency.then_some((right.index, history_length)),
+            include_recency.then(|| normalized_recency[right.index] as u64),
         )
         .cmp(&normalized_flex_admission_score(
             left.metrics,
             query_length,
-            include_recency.then_some((left.index, history_length)),
+            include_recency.then(|| normalized_recency[left.index] as u64),
         ))
         .then_with(|| left.index.cmp(&right.index))
     });
@@ -989,6 +999,7 @@ impl NativeHistory {
         Self {
             char_masks,
             bigram_masks,
+            normalized_recency: build_normalized_recency(candidates.len()),
             candidates,
             cwd_interner,
             daemon_query_cache: Mutex::new(DaemonQueryCache::default()),
@@ -1015,6 +1026,12 @@ impl NativeHistory {
             .clear();
     }
 
+    fn refresh_normalized_recency(&mut self) {
+        if self.normalized_recency.len() != self.candidates.len() {
+            self.normalized_recency = build_normalized_recency(self.candidates.len());
+        }
+    }
+
     pub fn extend(&mut self, candidates: Vec<CandidateInput>) {
         self.daemon_query_cache
             .get_mut()
@@ -1027,6 +1044,7 @@ impl NativeHistory {
             self.bigram_masks.push_back(bigram_mask);
             self.candidates.push_back(candidate);
         }
+        self.refresh_normalized_recency();
     }
 
     pub fn truncate(&mut self, length: usize) {
@@ -1040,6 +1058,7 @@ impl NativeHistory {
         self.char_masks.truncate(length);
         self.bigram_masks.truncate(length);
         self.candidates.truncate(length);
+        self.refresh_normalized_recency();
         self.prune_cwd_interner();
     }
 
@@ -1085,6 +1104,7 @@ impl NativeHistory {
             self.bigram_masks.push_front(bigram_mask);
             self.candidates.push_front(candidate);
         }
+        self.refresh_normalized_recency();
         self.prune_cwd_interner();
     }
 
@@ -1454,7 +1474,7 @@ impl NativeHistory {
                 let admission_score = normalized_flex_admission_score(
                     metrics,
                     query.len(),
-                    Some((index, self.candidates.len())),
+                    Some(self.normalized_recency[index] as u64),
                 );
                 let heap_entry = (
                     Reverse(admission_score),
@@ -1637,7 +1657,7 @@ impl NativeHistory {
                         bucket_limit,
                         true,
                         query.len(),
-                        self.candidates.len(),
+                        &self.normalized_recency,
                     );
                 for matched in &lower_matches {
                     if select_match(matched) {
@@ -1741,5 +1761,86 @@ impl NativeHistory {
             }
         }
         self.serialize_ranked_response(&selected, None)
+    }
+}
+
+#[cfg(test)]
+mod normalized_ratio_tests {
+    use super::*;
+
+    fn candidate(text: &str) -> CandidateInput {
+        (
+            text.to_string(),
+            text.to_lowercase(),
+            None,
+            vec![text.to_lowercase()],
+            false,
+        )
+    }
+
+    fn u128_reference(numerator: usize, denominator: usize) -> u64 {
+        if denominator == 0 {
+            return NORMALIZED_FLEX_SCALE;
+        }
+        ((numerator.min(denominator) as u128 * NORMALIZED_FLEX_SCALE as u128)
+            / denominator as u128) as u64
+    }
+
+    #[test]
+    fn u64_fast_path_matches_u128_reference() {
+        for (numerator, denominator) in [
+            (0, 1),
+            (1, 1),
+            (1, 3),
+            (2, 3),
+            (8, 200),
+            (100, 80),
+            (1_000_000, 10_000_000),
+        ] {
+            assert_eq!(
+                normalized_ratio(numerator, denominator),
+                u128_reference(numerator, denominator)
+            );
+        }
+        assert_eq!(normalized_ratio(0, 0), NORMALIZED_FLEX_SCALE);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn overflow_fallback_matches_u128_reference() {
+        let denominator = (u64::MAX / NORMALIZED_FLEX_SCALE + 1) as usize;
+        let numerator = denominator / 3;
+        assert_eq!(
+            normalized_ratio(numerator, denominator),
+            u128_reference(numerator, denominator)
+        );
+    }
+
+    #[test]
+    fn normalized_recency_is_precomputed_from_newest_to_oldest() {
+        assert_eq!(build_normalized_recency(0), Vec::<u32>::new());
+        assert_eq!(build_normalized_recency(1), vec![1_000_000]);
+        assert_eq!(
+            build_normalized_recency(5),
+            vec![1_000_000, 750_000, 500_000, 250_000, 0]
+        );
+    }
+
+    #[test]
+    fn normalized_recency_stays_aligned_after_history_mutations() {
+        let mut history = NativeHistory::new(vec![candidate("new"), candidate("old")]);
+        assert_eq!(history.normalized_recency, vec![1_000_000, 0]);
+
+        history.extend(vec![candidate("older")]);
+        assert_eq!(history.normalized_recency, vec![1_000_000, 500_000, 0]);
+
+        history.prepend_replacing(vec![candidate("newest")]);
+        assert_eq!(
+            history.normalized_recency,
+            vec![1_000_000, 666_666, 333_333, 0]
+        );
+
+        history.truncate(2);
+        assert_eq!(history.normalized_recency, vec![1_000_000, 0]);
     }
 }

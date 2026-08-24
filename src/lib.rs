@@ -243,8 +243,8 @@ mod tests {
             candidate_len: 3,
         };
         let without_recency = normalized_flex_admission_score(metrics, 3, None);
-        let newest = normalized_flex_admission_score(metrics, 3, Some((0, 10)));
-        let oldest = normalized_flex_admission_score(metrics, 3, Some((9, 10)));
+        let newest = normalized_flex_admission_score(metrics, 3, Some(1_000_000));
+        let oldest = normalized_flex_admission_score(metrics, 3, Some(0));
 
         assert_eq!(newest - without_recency, 1_000_000);
         assert_eq!(oldest, without_recency);
