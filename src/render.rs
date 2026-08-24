@@ -34,6 +34,8 @@ pub const RESULT_PREFIX_WIDTH: usize = 2;
 pub const FIXED_MATCH_TEXT_WIDTH: usize = 3000;
 pub const SELECTOR_GLYPH: &str = "●";
 pub const FAILED_SELECTOR_GLYPH: &str = "○";
+pub const SELECTOR_GLYPH_ENV: &str = "ZSH_FLEX_HISTORY_SELECTOR_GLYPH";
+pub const FAILED_SELECTOR_GLYPH_ENV: &str = "ZSH_FLEX_HISTORY_FAILED_SELECTOR_GLYPH";
 
 pub fn fg_code(slot: u8) -> String {
     if slot <= 7 {
@@ -155,6 +157,14 @@ pub fn positive_int_from_env(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+pub fn glyph_from_env(name: &str, default: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().chars().next())
+        .map(|glyph| glyph.to_string())
+        .unwrap_or_else(|| default.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchResult {
     pub text: String,
@@ -261,6 +271,31 @@ pub fn render_result_line(
     result_color: Option<u8>,
     runtime_color: Option<u8>,
 ) -> String {
+    let failed_selector_glyph = glyph_from_env(FAILED_SELECTOR_GLYPH_ENV, FAILED_SELECTOR_GLYPH);
+    render_result_line_with_glyphs(
+        item,
+        selected,
+        width,
+        _unselected_white,
+        suffix_text,
+        selector_glyph,
+        &failed_selector_glyph,
+        result_color,
+        runtime_color,
+    )
+}
+
+fn render_result_line_with_glyphs(
+    item: &MatchResult,
+    selected: bool,
+    width: usize,
+    _unselected_white: bool,
+    suffix_text: &str,
+    selector_glyph: &str,
+    failed_selector_glyph: &str,
+    result_color: Option<u8>,
+    runtime_color: Option<u8>,
+) -> String {
     if width == 0 {
         return String::new();
     }
@@ -294,7 +329,7 @@ pub fn render_result_line(
     };
 
     let selector_source = if item.failed {
-        FAILED_SELECTOR_GLYPH
+        failed_selector_glyph
     } else {
         selector_glyph
     };
@@ -474,6 +509,8 @@ pub fn draw_panel(
     let shared_result_width = result_render_width.min(RESULT_PREFIX_WIDTH + FIXED_MATCH_TEXT_WIDTH).max(1);
     let result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None);
     let runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None);
+    let selector_glyph = glyph_from_env(SELECTOR_GLYPH_ENV, SELECTOR_GLYPH);
+    let failed_selector_glyph = glyph_from_env(FAILED_SELECTOR_GLYPH_ENV, FAILED_SELECTOR_GLYPH);
 
     let mut result_lines = Vec::new();
     for i in 0..results_visible {
@@ -496,13 +533,14 @@ pub fn draw_panel(
         let item = &results[idx];
         let is_selected = idx == selected;
         let cache_key = format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
             item.text,
             item.runtime_completion,
             item.failed,
             is_selected,
             shared_result_width,
-            SELECTOR_GLYPH,
+            selector_glyph,
+            failed_selector_glyph,
             result_color,
             runtime_color
         );
@@ -510,13 +548,14 @@ pub fn draw_panel(
         let base_line = match state.render_line_cache.get(&cache_key) {
             Some(line) => line.clone(),
             None => {
-                let line = render_result_line(
+                let line = render_result_line_with_glyphs(
                     item,
                     is_selected,
                     shared_result_width,
                     true,
                     "",
-                    SELECTOR_GLYPH,
+                    &selector_glyph,
+                    &failed_selector_glyph,
                     result_color,
                     runtime_color,
                 );

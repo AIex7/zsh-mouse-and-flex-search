@@ -53,6 +53,10 @@ zsh-flex-history-import
 - `ZSH_FLEX_HISTORY_MAX_RETURNED_RESULTS`
   - Sets the maximum number of history results returned by each search.
   - Must be a positive integer. Defaults to `100` when unset or invalid.
+- `ZSH_FLEX_HISTORY_SELECTOR_GLYPH`
+  - Sets the glyph shown beside normal results. Defaults to `●`.
+- `ZSH_FLEX_HISTORY_FAILED_SELECTOR_GLYPH`
+  - Sets the glyph shown beside failed commands. Defaults to `○`.
     
 ## Keys
 

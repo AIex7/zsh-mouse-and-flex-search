@@ -268,6 +268,13 @@ FIXED_MATCH_TEXT_WIDTH = 3000
 RESULT_PREFIX_WIDTH = 2
 SELECTOR_GLYPH = "●"
 FAILED_SELECTOR_GLYPH = "○"
+SELECTOR_GLYPH_ENV = "ZSH_FLEX_HISTORY_SELECTOR_GLYPH"
+FAILED_SELECTOR_GLYPH_ENV = "ZSH_FLEX_HISTORY_FAILED_SELECTOR_GLYPH"
+
+
+def glyph_from_env(name: str, default: str) -> str:
+    value = os.environ.get(name, "").strip()
+    return value[:1] or default
 
 TERM_OUT = sys.stdout
 

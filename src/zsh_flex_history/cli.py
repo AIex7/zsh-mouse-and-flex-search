@@ -262,6 +262,7 @@ def render_result_line(
     unselected_white: bool = False,
     suffix_text: str = "",
     selector_glyph: str = SELECTOR_GLYPH,
+    failed_selector_glyph: str = FAILED_SELECTOR_GLYPH,
     result_color: Optional[int] = None,
     runtime_color: Optional[int] = None,
 ) -> str:
@@ -288,7 +289,7 @@ def render_result_line(
         selector_style = style(fg=runtime_color, bold=True)
     else:
         selector_style = style(fg=result_color, bold=True)
-    selector_source = FAILED_SELECTOR_GLYPH if item.failed else selector_glyph
+    selector_source = failed_selector_glyph if item.failed else selector_glyph
     selector = selector_source[:1] or SELECTOR_GLYPH
     if selected:
         gutter = f"{selector_style}{selector}{RESET} "
@@ -426,6 +427,8 @@ def draw_panel(
     shared_result_width = max(1, min(result_render_width, RESULT_PREFIX_WIDTH + FIXED_MATCH_TEXT_WIDTH))
     result_color = ansi_color_from_env("ZSH_FLEX_HISTORY_COLOR", None)
     runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None)
+    selector_glyph = glyph_from_env(SELECTOR_GLYPH_ENV, SELECTOR_GLYPH)
+    failed_selector_glyph = glyph_from_env(FAILED_SELECTOR_GLYPH_ENV, FAILED_SELECTOR_GLYPH)
     visible_result_count = min(results_visible, max(0, len(results) - offset))
     for i in range(results_visible):
         idx = offset + i
@@ -446,7 +449,8 @@ def draw_panel(
             item.failed,
             is_selected,
             shared_result_width,
-            SELECTOR_GLYPH,
+            selector_glyph,
+            failed_selector_glyph,
             result_color,
             runtime_color,
         )
@@ -458,7 +462,8 @@ def draw_panel(
                 shared_result_width,
                 unselected_white=True,
                 suffix_text="",
-                selector_glyph=SELECTOR_GLYPH,
+                selector_glyph=selector_glyph,
+                failed_selector_glyph=failed_selector_glyph,
                 result_color=result_color,
                 runtime_color=runtime_color,
             )
