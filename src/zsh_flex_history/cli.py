@@ -221,12 +221,12 @@ def wrapped_query_layout(
     return query_start, query_view_len, query_rows_used, results_visible
 
 
-def result_row_offset(visible_index: int, expanded: bool) -> int:
-    return visible_index * 2 if expanded else visible_index
+def result_row_offset(visible_index: int) -> int:
+    return visible_index * 2 + 1
 
 
-def results_fitting_rows(available_rows: int, expanded: bool) -> int:
-    return (available_rows + 1) // 2 if expanded else available_rows
+def results_fitting_rows(available_rows: int) -> int:
+    return available_rows // 2
 
 
 def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optional[tuple[int, int]]:
@@ -337,7 +337,6 @@ def draw_panel(
     offset: int,
     panel_rows: int,
     width: int,
-    results_expanded: bool = False,
     clear_previous_cursor: bool = True,
     status_message: str = "",
     debug_note: str = "",
@@ -445,7 +444,7 @@ def draw_panel(
     separator_style = style(dim=True)
     result_lines = [""] * results_visible
     visible_result_count = min(
-        results_fitting_rows(results_visible, results_expanded),
+        results_fitting_rows(results_visible),
         max(0, len(results) - offset),
     )
     for i in range(visible_result_count):
@@ -482,10 +481,10 @@ def draw_panel(
                 if len(render_line_cache) >= 2048:
                     render_line_cache.clear()
                 render_line_cache[cache_key] = base_line
-        row = result_row_offset(i, results_expanded)
+        row = result_row_offset(i)
         result_lines[row] = result_padding + base_line
-        if results_expanded and i + 1 < visible_result_count and row + 1 < len(result_lines):
-            result_lines[row + 1] = (
+        if row > 0:
+            result_lines[row - 1] = (
                 result_padding + separator_style + ("─" * shared_result_width) + RESET
             )
     if visible_result_count == 0 and status_message and result_lines:
@@ -876,7 +875,7 @@ def run(
     if fd is None:
         print("zsh_flex_history: no usable TTY available for interactive mode", file=sys.stderr)
         return None
-    min_result_rows = 3
+    min_result_rows = 4
     min_panel_rows = 1 + min_result_rows
     try:
         with RawTerminal(fd) as rt:
@@ -1087,7 +1086,7 @@ def run(
                     next_panel_rows,
                     continuation_query_width,
                 )
-                current_results = [item.text for item in results[:3]]
+                current_results = [item.text for item in results[:2]]
                 if last_refresh_query != query:
                     query_rows = build_query_visual_rows(query, query_width, continuation_query_width)
                     common_length = 0
@@ -1133,7 +1132,11 @@ def run(
                         current_results[result_index] if result_index < len(current_results) else ""
                     )
                     if previous_result != current_result:
-                        result_row = next_anchor_row + query_rows_used + result_index
+                        result_row = (
+                            next_anchor_row
+                            + query_rows_used
+                            + result_row_offset(result_index)
+                        )
                         clear_result_col = result_changed_suffix_col(
                             previous_result,
                             current_result,
@@ -1141,7 +1144,9 @@ def run(
                         )
                         term_write(move_to(result_row, clear_result_col) + CLEAR_TO_END)
                 last_refresh_results = current_results
-                clear_after_results_row = next_anchor_row + query_rows_used + 3
+                clear_after_results_row = (
+                    next_anchor_row + query_rows_used + min_result_rows
+                )
                 for row in range(clear_after_results_row, term_lines + 1):
                     term_write(move_to(row, 1) + CLEAR_TO_END)
                 term_write(move_to(anchor_row, anchor_col))
@@ -1364,7 +1369,7 @@ def run(
                     )
                     visible = max(
                         1,
-                        results_fitting_rows(layout_results_visible, results_expanded),
+                        results_fitting_rows(layout_results_visible),
                     )
                     cache_key = query
                     if cache_key in match_cache:
@@ -1436,7 +1441,6 @@ def run(
                         offset,
                         panel_rows,
                         width,
-                        results_expanded=results_expanded,
                         clear_previous_cursor=not skip_previous_cursor_clear,
                         status_message=status_message,
                         debug_note=debug_note,

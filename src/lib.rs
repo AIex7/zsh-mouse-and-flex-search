@@ -140,12 +140,13 @@ mod tests {
     }
 
     #[test]
-    fn expanded_results_use_every_other_terminal_row() {
-        assert_eq!(result_row_offset(0, true), 0);
-        assert_eq!(result_row_offset(1, true), 2);
-        assert_eq!(result_row_offset(2, true), 4);
-        assert_eq!(results_fitting_rows(7, true), 4);
-        assert_eq!(results_fitting_rows(3, false), 3);
+    fn results_always_use_every_other_terminal_row() {
+        assert_eq!(result_row_offset(0), 1);
+        assert_eq!(result_row_offset(1), 3);
+        assert_eq!(result_row_offset(2), 5);
+        assert_eq!(results_fitting_rows(7), 3);
+        assert_eq!(results_fitting_rows(5), 2);
+        assert_eq!(results_fitting_rows(4), 2);
     }
 
     #[test]

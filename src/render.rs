@@ -408,7 +408,6 @@ pub fn draw_panel(
     selected: usize,
     offset: usize,
     panel_rows: usize,
-    results_expanded: bool,
     width: usize,
     clear_previous_cursor: bool,
     status_message: &str,
@@ -540,7 +539,7 @@ pub fn draw_panel(
     let separator_style = style(StyleOptions { dim: true, ..Default::default() });
 
     let mut result_lines = vec![String::new(); results_visible];
-    let visible_result_count = results_fitting_rows(results_visible, results_expanded)
+    let visible_result_count = results_fitting_rows(results_visible)
         .min(results.len().saturating_sub(offset));
     for i in 0..visible_result_count {
         let idx = offset + i;
@@ -581,10 +580,10 @@ pub fn draw_panel(
                 line
             }
         };
-        let row = result_row_offset(i, results_expanded);
+        let row = result_row_offset(i);
         result_lines[row] = format!("{}{}", result_padding, base_line);
-        if results_expanded && i + 1 < visible_result_count && row + 1 < result_lines.len() {
-            result_lines[row + 1] = format!(
+        if row > 0 {
+            result_lines[row - 1] = format!(
                 "{}{}{}{}",
                 result_padding,
                 separator_style,

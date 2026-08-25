@@ -226,12 +226,12 @@ pub fn wrapped_query_layout(
     (query_start, query_view_len, query_rows_used, results_visible)
 }
 
-pub fn result_row_offset(visible_index: usize, expanded: bool) -> usize {
-    if expanded { visible_index.saturating_mul(2) } else { visible_index }
+pub fn result_row_offset(visible_index: usize) -> usize {
+    visible_index.saturating_mul(2).saturating_add(1)
 }
 
-pub fn results_fitting_rows(available_rows: usize, expanded: bool) -> usize {
-    if expanded { available_rows.saturating_add(1) / 2 } else { available_rows }
+pub fn results_fitting_rows(available_rows: usize) -> usize {
+    available_rows / 2
 }
 
 pub fn selection_bounds(sel_anchor: Option<usize>, sel_end: Option<usize>) -> Option<(usize, usize)> {

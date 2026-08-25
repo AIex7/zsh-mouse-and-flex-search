@@ -90,7 +90,7 @@ pub fn run(
         }
     };
 
-    let min_result_rows: usize = 3;
+    let min_result_rows: usize = 4;
     let min_panel_rows: usize = 1 + min_result_rows;
 
     let _rt = match RawTerminal::enter(fd, opened_tty_fd.is_some()) {
@@ -476,7 +476,7 @@ pub fn run(
         let q_width = query_text_render_width(r_width, 1);
         let cont_width = terminal_safe_render_width(cols, 1);
         let (q_start, _, q_rows_used, _) = wrapped_query_layout(query_str, c_pos, q_width, next_panel_rows, Some(cont_width), None);
-        let current_results: Vec<String> = results_list.iter().take(3).map(|i| i.text.clone()).collect();
+        let current_results: Vec<String> = results_list.iter().take(2).map(|i| i.text.clone()).collect();
 
         if last_ref_query.as_deref() != Some(query_str) {
             let q_rows = build_query_visual_rows(query_str, q_width, Some(cont_width));
@@ -508,7 +508,7 @@ pub fn run(
         for (res_idx, curr_res) in current_results.iter().enumerate() {
             let prev_res = last_ref_results.get(res_idx).map(|s| s.as_str()).unwrap_or("");
             if prev_res != curr_res {
-                let res_row = next_anchor_row + q_rows_used + res_idx;
+                let res_row = next_anchor_row + q_rows_used + result_row_offset(res_idx);
                 let clear_res_col = result_changed_suffix_col(prev_res, curr_res, next_anchor_col);
                 term_write(fd, &format!("{}{}", move_to(res_row, clear_res_col), CLEAR_TO_END));
             }
@@ -518,7 +518,7 @@ pub fn run(
         let clear_after_results_row = if q_rows.len() > 1 {
             next_anchor_row + q_rows_used
         } else {
-            next_anchor_row + q_rows_used + 3
+            next_anchor_row + q_rows_used + min_result_rows
         };
         for r in clear_after_results_row..=t_lines {
             term_write(fd, &format!("{}{}", move_to(r, 1), CLEAR_TO_END));
@@ -600,7 +600,7 @@ pub fn run(
             Some(continuation_query_width),
             Some(&query_rows),
         );
-        let visible = results_fitting_rows(layout_results_visible, results_expanded).max(1);
+        let visible = results_fitting_rows(layout_results_visible).max(1);
 
         let mut results;
         if let Some((indices, cached_res)) = match_cache.get(&query) {
@@ -677,7 +677,6 @@ pub fn run(
             selected,
             offset,
             panel_rows,
-            results_expanded,
             t_cols,
             !skip_previous_cursor_clear,
             status_message,
