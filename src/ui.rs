@@ -244,6 +244,7 @@ pub fn run(
                     cwd: item.cwd,
                     text_lower: None,
                     runtime_completion: false,
+                    runtime_completion_span: None,
                     failed: item.failed,
                     words: item.words,
                 })
@@ -284,6 +285,7 @@ pub fn run(
                             cwd: item.cwd,
                             text_lower: None,
                             runtime_completion: false,
+                            runtime_completion_span: None,
                             failed: item.failed,
                             words: item.words,
                         })

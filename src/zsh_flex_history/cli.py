@@ -275,16 +275,14 @@ def render_result_line(
     body_width = max(0, width - gutter_width - suffix_width)
     display_text = terminal_safe_result_text(item.text)
     text = truncate_text(display_text, body_width)
-    if item.runtime_completion:
-        if selected:
-            normal_style = RESET + style(fg=runtime_color, bold=True)
-        else:
-            normal_style = RESET + style(fg=runtime_color)
-    else:
-        if selected:
-            normal_style = RESET + style(fg=result_color, bold=True)
-        else:
-            normal_style = RESET
+    completion_span = None
+    if item.runtime_completion_span is not None:
+        start, end = item.runtime_completion_span
+        display_start = len(terminal_safe_result_text(item.text[:start]))
+        display_end = display_start + len(terminal_safe_result_text(item.text[start:end]))
+        completion_span = (display_start, display_end)
+    normal_style = RESET + style(fg=result_color, bold=True) if selected else RESET
+    completion_style = RESET + style(fg=runtime_color if runtime_color is not None else 4, bold=selected)
 
     if item.runtime_completion:
         selector_style = style(fg=runtime_color, bold=True)
@@ -299,10 +297,15 @@ def render_result_line(
 
     out: list[str] = []
     active_style = ""
-    for ch in text:
-        if normal_style != active_style:
-            out.append(normal_style if normal_style else RESET)
-            active_style = normal_style
+    for index, ch in enumerate(text):
+        character_style = (
+            completion_style
+            if completion_span is not None and completion_span[0] <= index < completion_span[1]
+            else normal_style
+        )
+        if character_style != active_style:
+            out.append(character_style)
+            active_style = character_style
         out.append(ch)
     if suffix_text:
         if normal_style != active_style:
@@ -447,6 +450,7 @@ def draw_panel(
             item.text,
             item.text_lower,
             item.runtime_completion,
+            item.runtime_completion_span,
             item.failed,
             is_selected,
             shared_result_width,

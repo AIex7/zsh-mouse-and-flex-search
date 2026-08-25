@@ -383,6 +383,7 @@ mod tests {
             cwd: None,
             text_lower: None,
             runtime_completion,
+            runtime_completion_span: None,
             failed: false,
             words: Vec::new(),
         };

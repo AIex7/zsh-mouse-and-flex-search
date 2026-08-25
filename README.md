@@ -41,9 +41,9 @@ zsh-flex-history-import
   - Accepts `0`-`15` or names like `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, and `bright-blue`.
   - Defaults to the terminal's foreground color.
 - `ZSH_FLEX_HISTORY_RUNTIME_COLOR`
-  - Sets the ANSI color used for runtime completions.
+  - Sets the ANSI color used for the newly completed filename or directory and its selector glyph.
   - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`.
-  - Defaults to the terminal's foreground color.
+  - Defaults to the terminal theme's blue.
 - `ZSH_FLEX_HISTORY_CURSOR_COLOR`
   - Sets the ANSI background color of the visual cursor.
   - Accepts the same `0`-`15` values and color names as `ZSH_FLEX_HISTORY_COLOR`, plus `#RRGGBB` values such as `#ff0000`.

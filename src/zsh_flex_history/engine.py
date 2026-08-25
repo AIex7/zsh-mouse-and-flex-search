@@ -84,6 +84,7 @@ class MatchResult:
     cwd: Optional[str] = None
     text_lower: Optional[str] = None
     runtime_completion: bool = False
+    runtime_completion_span: Optional[tuple[int, int]] = None
     failed: bool = False
     words: tuple[str, ...] = ()
 
@@ -1118,6 +1119,13 @@ def runtime_completion_matches(
         completed_query = replace_query_token(query, cursor_pos, completed_token)
         if completed_query == query:
             continue
+        encoded_name = (
+            shell_escape_quoted_fragment(chosen.name, quote)
+            if quote is not None
+            else shell_escape_fragment(chosen.name)
+        )
+        completion_end = start + len(completed_token) - int(chosen.is_dir) - int(quote is not None)
+        completion_start = completion_end - len(encoded_name)
 
         completed_query_lower = completed_query.lower()
         runtime_matches.append(
@@ -1126,6 +1134,7 @@ def runtime_completion_matches(
                 score=10**9,
                 text_lower=completed_query_lower,
                 runtime_completion=True,
+                runtime_completion_span=(completion_start, completion_end),
             )
         )
         if len(runtime_matches) >= limit:
@@ -1143,10 +1152,14 @@ def insert_runtime_completions(
     if not runtime_completions:
         return results
     merged = list(results)
-    runtime_texts = {item.text for item in runtime_completions}
+    runtime_spans = {item.text: item.runtime_completion_span for item in runtime_completions}
     for index, item in enumerate(merged):
-        if item.text in runtime_texts:
-            merged[index] = replace(item, runtime_completion=True)
+        if item.text in runtime_spans:
+            merged[index] = replace(
+                item,
+                runtime_completion=True,
+                runtime_completion_span=runtime_spans[item.text],
+            )
     merged_texts = {item.text for item in merged}
     insertion_index = 0
     for runtime_completion in runtime_completions[:featured_count]:

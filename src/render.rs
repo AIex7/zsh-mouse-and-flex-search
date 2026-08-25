@@ -174,6 +174,7 @@ pub struct MatchResult {
     pub cwd: Option<String>,
     pub text_lower: Option<String>,
     pub runtime_completion: bool,
+    pub runtime_completion_span: Option<(usize, usize)>,
     pub failed: bool,
     pub words: Vec<String>,
 }
@@ -316,18 +317,28 @@ fn render_result_line_with_glyphs(
     let body_width = width.saturating_sub(gutter_width + suffix_width);
     let display_text = terminal_safe_result_text(&item.text);
     let text = truncate_text(&display_text, body_width);
+    let completion_span = item.runtime_completion_span.map(|(start, end)| {
+        let prefix = query_char_slice(&item.text, 0, start);
+        let completed = query_char_slice(&item.text, start, end);
+        let display_start = terminal_safe_result_text(&prefix).chars().count();
+        let display_end = display_start + terminal_safe_result_text(&completed).chars().count();
+        (display_start, display_end)
+    });
 
-    let normal_style = if item.runtime_completion {
-        if selected {
-            format!("{}{}", RESET, style(StyleOptions { fg: runtime_color, bold: true, ..Default::default() }))
-        } else {
-            format!("{}{}", RESET, style(StyleOptions { fg: runtime_color, ..Default::default() }))
-        }
-    } else if selected {
+    let normal_style = if selected {
         format!("{}{}", RESET, style(StyleOptions { fg: result_color, bold: true, ..Default::default() }))
     } else {
         RESET.to_string()
     };
+    let completion_style = format!(
+        "{}{}",
+        RESET,
+        style(StyleOptions {
+            fg: Some(runtime_color.unwrap_or(4)),
+            bold: selected,
+            ..Default::default()
+        })
+    );
 
     let selector_style = if item.runtime_completion {
         style(StyleOptions { fg: runtime_color, bold: true, ..Default::default() })
@@ -350,10 +361,17 @@ fn render_result_line_with_glyphs(
 
     let mut out = Vec::new();
     let mut active_style = String::new();
-    for ch in text.chars() {
-        if normal_style != active_style {
-            out.push(if !normal_style.is_empty() { normal_style.clone() } else { RESET.to_string() });
-            active_style = normal_style.clone();
+    for (index, ch) in text.chars().enumerate() {
+        let character_style = if completion_span
+            .is_some_and(|(start, end)| start <= index && index < end)
+        {
+            &completion_style
+        } else {
+            &normal_style
+        };
+        if character_style != &active_style {
+            out.push(character_style.clone());
+            active_style = character_style.clone();
         }
         out.push(ch.to_string());
     }
@@ -540,9 +558,10 @@ pub fn draw_panel(
         let item = &results[idx];
         let is_selected = idx == selected;
         let cache_key = format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
+            "{}\t{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
             item.text,
             item.runtime_completion,
+            item.runtime_completion_span,
             item.failed,
             is_selected,
             shared_result_width,
@@ -634,12 +653,31 @@ pub fn draw_panel(
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_safe_result_text;
+    use super::*;
 
     #[test]
     fn result_newlines_use_visible_symbol() {
         assert_eq!(terminal_safe_result_text("one\ntwo"), "one\\ntwo");
         assert_eq!(terminal_safe_result_text("one\r\ntwo"), "one\\ntwo");
         assert_eq!(terminal_safe_result_text("one\rtwo"), "one\\ntwo");
+    }
+
+    #[test]
+    fn runtime_completion_colors_only_completed_name() {
+        let item = MatchResult {
+            text: "/desktop/this/newdir/".to_string(),
+            score: 0,
+            exact: false,
+            recency: 0,
+            cwd: None,
+            text_lower: None,
+            runtime_completion: true,
+            runtime_completion_span: Some((14, 20)),
+            failed: false,
+            words: Vec::new(),
+        };
+
+        let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
+        assert!(rendered.contains("/desktop/this/\x1b[0m\x1b[34mnewdir\x1b[0m/"));
     }
 }

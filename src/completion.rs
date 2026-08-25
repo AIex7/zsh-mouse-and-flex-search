@@ -362,6 +362,15 @@ pub fn runtime_completion_matches(
         if completed_query == query {
             continue;
         }
+        let encoded_name = if let Some(q) = quote {
+            shell_escape_quoted_fragment(&chosen.name, q)
+        } else {
+            shell_escape_fragment(&chosen.name)
+        };
+        let completion_end = start + completed_token.chars().count()
+            - usize::from(chosen.is_dir)
+            - usize::from(quote.is_some());
+        let completion_start = completion_end - encoded_name.chars().count();
 
         let completed_query_lower = completed_query.to_lowercase();
         runtime_matches.push(MatchResult {
@@ -372,6 +381,7 @@ pub fn runtime_completion_matches(
             cwd: None,
             text_lower: Some(completed_query_lower),
             runtime_completion: true,
+            runtime_completion_span: Some((completion_start, completion_end)),
             failed: false,
             words: Vec::new(),
         });
@@ -392,10 +402,14 @@ pub fn insert_runtime_completions(
         return results;
     }
     let mut merged = results;
-    let runtime_texts: HashSet<String> = runtime_completions.iter().map(|item| item.text.clone()).collect();
+    let runtime_spans: HashMap<String, Option<(usize, usize)>> = runtime_completions
+        .iter()
+        .map(|item| (item.text.clone(), item.runtime_completion_span))
+        .collect();
     for item in &mut merged {
-        if runtime_texts.contains(&item.text) {
+        if let Some(span) = runtime_spans.get(&item.text) {
             item.runtime_completion = true;
+            item.runtime_completion_span = *span;
         }
     }
     let mut merged_texts: HashSet<String> = merged.iter().map(|item| item.text.clone()).collect();
@@ -407,6 +421,7 @@ pub fn insert_runtime_completions(
         {
             let mut existing = merged.remove(existing_index);
             existing.runtime_completion = true;
+            existing.runtime_completion_span = runtime_completion.runtime_completion_span;
             merged.insert(insertion_index, existing);
         } else {
             merged.insert(insertion_index, runtime_completion.clone());
@@ -446,5 +461,7 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].text, "echo caf\\é-file");
+        let (start, end) = matches[0].runtime_completion_span.unwrap();
+        assert_eq!(query_char_slice(&matches[0].text, start, end), "caf\\é-file");
     }
 }
