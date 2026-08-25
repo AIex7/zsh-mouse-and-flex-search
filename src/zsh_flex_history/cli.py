@@ -236,6 +236,7 @@ def terminal_safe_result_text(text: str) -> str:
     text = _TERMINAL_OSC_RE.sub("", text)
     text = _TERMINAL_CSI_RE.sub("", text)
     text = _TERMINAL_ESC_RE.sub("", text)
+    text = text.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
     return _TERMINAL_CONTROL_RE.sub(" ", text)
 
 

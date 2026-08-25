@@ -215,7 +215,14 @@ pub fn terminal_safe_result_text(text: &str) -> String {
                 continue;
             }
         }
-        if (ch as u32) < 32 || ((ch as u32) >= 0x7F && (ch as u32) <= 0x9F) {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push_str("\\n");
+        } else if ch == '\n' {
+            out.push_str("\\n");
+        } else if (ch as u32) < 32 || ((ch as u32) >= 0x7F && (ch as u32) <= 0x9F) {
             out.push(' ');
         } else {
             out.push(ch);
@@ -623,4 +630,16 @@ pub fn draw_panel(
     state.previous_visual_cursor = Some((anchor_row + cursor_row, draw_col_for_row(cursor_row) + visual_cursor_col));
 
     (query_start, query_view_len, query_rows_used, results_visible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_safe_result_text;
+
+    #[test]
+    fn result_newlines_use_visible_symbol() {
+        assert_eq!(terminal_safe_result_text("one\ntwo"), "one\\ntwo");
+        assert_eq!(terminal_safe_result_text("one\r\ntwo"), "one\\ntwo");
+        assert_eq!(terminal_safe_result_text("one\rtwo"), "one\\ntwo");
+    }
 }
