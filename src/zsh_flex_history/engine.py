@@ -258,6 +258,8 @@ ENABLE_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 DISABLE_MOUSE = "\x1b[?1000l\x1b[?1002l\x1b[?1006l"
 ENABLE_KITTY_KEYBOARD = "\x1b[>1u"
 DISABLE_KITTY_KEYBOARD = "\x1b[<u"
+ENABLE_BRACKETED_PASTE = "\x1b[?2004h"
+DISABLE_BRACKETED_PASTE = "\x1b[?2004l"
 MAX_RETURNED_RESULTS_ENV = "ZSH_FLEX_HISTORY_MAX_RETURNED_RESULTS"
 DEFAULT_MAX_RETURNED_RESULTS = 100
 MAX_RETURNED_RESULTS = positive_int_from_env(
@@ -321,15 +323,16 @@ def read_clipboard() -> str:
 
 
 def normalize_pasted_text(text: str) -> str:
-    # Keep multiline content, but strip terminal control artifacts.
+    # Keep multiline content, but strip terminal control sequences and
+    # remaining unsafe control characters before the query renders them.
     normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
-    # Drop CSI sequences (including stray bracketed-paste/mouse reports).
+    normalized = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\|$)", "", normalized)
+    normalized = re.sub(r"\x1b[PX^_].*?(?:\x1b\\|$)", "", normalized, flags=re.DOTALL)
     normalized = re.sub(r"\x1b\[[0-9;?<>]*[ -/]*[@-~]", "", normalized)
-    # Drop leaked bracketed-paste markers even if ESC got stripped.
+    normalized = re.sub(r"\x1b.", "", normalized, flags=re.DOTALL)
     normalized = normalized.replace("200~", "").replace("201~", "")
-    # Drop leaked SGR mouse payloads when ESC is missing.
     normalized = re.sub(r"<\d+;\d+;\d+[mM]", "", normalized)
-    return normalized
+    return re.sub(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]", "", normalized)
 
 
 def supports_kitty_keyboard_protocol() -> bool:
@@ -352,12 +355,13 @@ class RawTerminal:
         # Start with mouse reporting disabled; it will be enabled lazily
         # once the user types the first character in the query.
         term_write(DISABLE_MOUSE)
+        term_write(ENABLE_BRACKETED_PASTE)
         term_write(HIDE_CURSOR)
         term_flush()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        term_write(DISABLE_MOUSE + SHOW_CURSOR + RESET)
+        term_write(DISABLE_MOUSE + DISABLE_BRACKETED_PASTE + SHOW_CURSOR + RESET)
         term_flush()
         if self._old is not None:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self._old)

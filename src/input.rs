@@ -141,10 +141,10 @@ fn parse_csi_key(full: &[u8]) -> Option<InputEvent> {
             if (codepoint == 67 || codepoint == 99) && (alt || super_key) {
                 return Some(InputEvent::Copy);
             }
-            if (codepoint == 86 || codepoint == 118) && (alt || super_key) {
+            if (codepoint == 86 || codepoint == 118) && alt {
                 return Some(InputEvent::Paste);
             }
-            if (32..127).contains(&codepoint) {
+            if (32..127).contains(&codepoint) && !ctrl && !alt && !super_key {
                 if let Some(ch) = char::from_u32(codepoint) {
                     return Some(InputEvent::Char(ch));
                 }
@@ -233,6 +233,33 @@ fn read_pending_burst(fd: RawFd, initial: &[u8]) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+fn read_bracketed_paste(fd: RawFd) -> String {
+    const END: &[u8] = b"\x1b[201~";
+    let mut buf = Vec::new();
+    let mut last_input = Instant::now();
+    let mut complete = false;
+    while buf.len() < 1_000_000 && last_input.elapsed() < Duration::from_secs(2) {
+        if !select_readable(fd, Some(Duration::from_millis(50))) {
+            continue;
+        }
+        let Some(byte) = read_exact_one_byte(fd) else {
+            break;
+        };
+        last_input = Instant::now();
+        buf.push(byte);
+        if buf.ends_with(END) {
+            buf.truncate(buf.len() - END.len());
+            complete = true;
+            break;
+        }
+    }
+    if complete {
+        String::from_utf8_lossy(&buf).to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn read_utf8_char(fd: RawFd, first_byte: u8) -> char {
     if first_byte < 0x80 {
         return first_byte as char;
@@ -314,6 +341,9 @@ pub fn read_key(fd: RawFd, timeout: Option<Duration>) -> InputEvent {
 
             if full == b"\x1b" {
                 return InputEvent::Escape;
+            }
+            if full == b"\x1b[200~" {
+                return InputEvent::PasteText(read_bracketed_paste(fd));
             }
             if full == b"\x1b\r" || full == b"\x1b\n" {
                 return InputEvent::Char('\n');
@@ -418,6 +448,31 @@ mod tests {
         assert_eq!(
             read_key(fds[0], Some(Duration::from_millis(100))),
             InputEvent::Char('\n')
+        );
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn bracketed_paste_is_one_event_with_newlines() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let encoded = b"\x1b[200~one\ntwo\x1b[201~";
+        assert_eq!(
+            unsafe {
+                libc::write(
+                    fds[1],
+                    encoded.as_ptr() as *const libc::c_void,
+                    encoded.len(),
+                )
+            },
+            encoded.len() as isize
+        );
+        assert_eq!(
+            read_key(fds[0], Some(Duration::from_millis(100))),
+            InputEvent::PasteText("one\ntwo".to_string())
         );
         unsafe {
             libc::close(fds[0]);

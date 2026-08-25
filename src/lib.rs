@@ -399,6 +399,34 @@ mod tests {
     }
 
     #[test]
+    fn one_history_result_stays_between_first_and_remaining_runtime_completions() {
+        let result = |text: &str, runtime_completion: bool| render::MatchResult {
+            text: text.to_string(),
+            score: 0,
+            exact: false,
+            recency: 0,
+            cwd: None,
+            text_lower: None,
+            runtime_completion,
+            runtime_completion_span: None,
+            failed: false,
+            words: Vec::new(),
+        };
+        let history = vec![result("history", false)];
+        let runtime = vec![
+            result("runtime 1", true),
+            result("runtime 2", true),
+            result("runtime 3", true),
+        ];
+
+        let merged = insert_runtime_completions(history, runtime, 1);
+        assert_eq!(
+            merged.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(),
+            vec!["runtime 1", "history", "runtime 2", "runtime 3"]
+        );
+    }
+
+    #[test]
     fn sqlite_custom_history_lifecycle() {
         let temp_dir = std::env::temp_dir().join(format!("zfh_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);

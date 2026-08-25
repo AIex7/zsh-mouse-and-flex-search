@@ -619,7 +619,7 @@ pub fn run(
             results = filter_exact_query_match(&query, displayed_results.clone());
         }
 
-        let runtime_limit = if results.len() == 1 { 2 } else if results.is_empty() { 3 } else { 1 };
+        let runtime_limit = if results.is_empty() { 3 } else { 1 };
         let runtime_cache_key = (query.clone(), cursor_pos);
         let runtime_completions = match runtime_completion_cache.get(&runtime_cache_key) {
             Some(comp) => comp.clone(),

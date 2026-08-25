@@ -601,9 +601,9 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
                 return "select_all", None
             if codepoint in (67, 99) and (alt or super_key):
                 return "copy", None
-            if codepoint in (86, 118) and (alt or super_key):
+            if codepoint in (86, 118) and alt:
                 return "paste", None
-            if 32 <= codepoint < 127:
+            if 32 <= codepoint < 127 and not (ctrl or alt or super_key):
                 return "char", chr(codepoint)
 
         # Handle modified cursor keys in CSI-u style (e.g. ESC [ 1 ; 2 D).
@@ -663,6 +663,26 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
             if len(buf) >= 1_000_000:
                 break
         return bytes(buf).decode("utf-8", errors="replace")
+
+    def read_bracketed_paste() -> str:
+        end = b"\x1b[201~"
+        buf = bytearray()
+        last_input = time.monotonic()
+        complete = False
+        while len(buf) < 1_000_000 and time.monotonic() - last_input < 2.0:
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if not ready:
+                continue
+            chunk = os.read(fd, 1)
+            if not chunk:
+                break
+            last_input = time.monotonic()
+            buf.extend(chunk)
+            if buf.endswith(end):
+                del buf[-len(end) :]
+                complete = True
+                break
+        return bytes(buf).decode("utf-8", errors="replace") if complete else ""
 
     def read_utf8_char(first_byte: int) -> str:
         if first_byte < 0x80:
@@ -725,6 +745,8 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
             full = b"\x1b" + seq
             if full == b"\x1b":
                 return "escape", None
+            if full == b"\x1b[200~":
+                return "paste_text", read_bracketed_paste()
             if full in (b"\x1b\r", b"\x1b\n"):
                 return "char", "\n"
             if full in (b"\x1b[A",):

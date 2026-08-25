@@ -10,6 +10,8 @@ pub const ENABLE_MOUSE: &str = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 pub const DISABLE_MOUSE: &str = "\x1b[?1000l\x1b[?1002l\x1b[?1006l";
 pub const ENABLE_KITTY_KEYBOARD: &str = "\x1b[>1u";
 pub const DISABLE_KITTY_KEYBOARD: &str = "\x1b[<u";
+pub const ENABLE_BRACKETED_PASTE: &str = "\x1b[?2004h";
+pub const DISABLE_BRACKETED_PASTE: &str = "\x1b[?2004l";
 
 pub fn move_to(row: usize, col: usize) -> String {
     format!("\x1b[{};{}H", row.max(1), col.max(1))
@@ -85,6 +87,7 @@ impl RawTerminal {
         };
 
         term_write(fd, DISABLE_MOUSE);
+        term_write(fd, ENABLE_BRACKETED_PASTE);
         term_write(fd, HIDE_CURSOR);
 
         Ok(term)
@@ -98,6 +101,7 @@ impl RawTerminal {
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         term_write(self.fd, DISABLE_MOUSE);
+        term_write(self.fd, DISABLE_BRACKETED_PASTE);
         term_write(self.fd, SHOW_CURSOR);
         term_write(self.fd, RESET);
 
@@ -446,18 +450,41 @@ pub fn normalize_pasted_text(text: &str) -> String {
     let mut out = String::with_capacity(normalized.len());
     let mut chars = normalized.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            while let Some(&c) = chars.peek() {
-                if (0x40..=0x7E).contains(&(c as u32)) {
-                    chars.next();
-                    break;
+        if ch == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if (0x40..=0x7E).contains(&(c as u32)) {
+                            break;
+                        }
+                    }
                 }
-                chars.next();
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some('P' | 'X' | '^' | '_') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some(_) | None => {}
             }
             continue;
         }
-        out.push(ch);
+        if ch == '\n' || !ch.is_control() {
+            out.push(ch);
+        }
     }
     out.replace("200~", "")
         .replace("201~", "")
@@ -505,5 +532,11 @@ mod terminal_tests {
             parse_selection_foreground_color_response(raw),
             Some("#eeddcc".to_string())
         );
+    }
+
+    #[test]
+    fn pasted_text_removes_terminal_sequences_and_preserves_newlines() {
+        let raw = "one\x1b[31m\ntwo\x1b]52;c;payload\x07three\x1bPprivate\x1b\\four\x07";
+        assert_eq!(normalize_pasted_text(raw), "one\ntwothreefour");
     }
 }
