@@ -220,9 +220,11 @@ pub fn run(
     let mut sel_end: Option<usize> = None;
     let mut selected = 0;
     let mut offset = 0;
+    let mut results_expanded = false;
     let chosen: Option<String>;
     let mut query_start;
     let mut query_rows_used;
+    let mut last_drawn_panel_rows;
 
     let loaded = history_client.search_history(
         "",
@@ -568,8 +570,12 @@ pub fn run(
         let continuation_query_width = terminal_safe_render_width(t_cols, 1);
         let query_rows = build_query_visual_rows(&query, query_width, Some(continuation_query_width));
         let required_query_rows = query_rows.len().max(1);
-        let desired_panel_rows = min_panel_rows.max(required_query_rows + min_result_rows);
         let max_panel_rows = (term_lines - anchor_row + 1).max(1);
+        let desired_panel_rows = if results_expanded {
+            max_panel_rows
+        } else {
+            min_panel_rows.max(required_query_rows + min_result_rows)
+        };
 
         if desired_panel_rows > max_panel_rows && anchor_row > 1 {
             let extra_rows = (desired_panel_rows - max_panel_rows).min(anchor_row - 1);
@@ -657,7 +663,7 @@ pub fn run(
         }
 
         let syntax_tokens = syntax_highlighter.highlight(&query);
-        let (qs, _, qru, _rv) = draw_panel(
+        let (qs, _, qru, rv) = draw_panel(
             fd,
             anchor_row,
             anchor_col,
@@ -681,6 +687,7 @@ pub fn run(
         );
         query_start = qs;
         query_rows_used = qru;
+        last_drawn_panel_rows = qru + rv;
         skip_previous_cursor_clear = false;
 
         term_write(fd, &move_to(start_row, start_col));
@@ -820,6 +827,13 @@ pub fn run(
                 selected = selected.saturating_sub(1);
             }
             InputEvent::Down => {
+                let current_term_lines = tty_terminal_size(fd, (120, 24)).1;
+                let available_panel_rows = current_term_lines
+                    .saturating_sub(anchor_row)
+                    .saturating_add(1);
+                if available_panel_rows > last_drawn_panel_rows {
+                    results_expanded = true;
+                }
                 selected = (selected + 1).min(results.len().saturating_sub(1));
             }
             InputEvent::PgUp => {

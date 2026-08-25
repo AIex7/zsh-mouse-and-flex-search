@@ -901,6 +901,7 @@ def run(
             sel_end: Optional[int] = None
             selected = 0
             offset = 0
+            results_expanded = False
             chosen: Optional[str] = None
             query_start = 0
             query_rows_used = 1
@@ -992,7 +993,7 @@ def run(
             search_thread.start()
 
             def reanchor_from_position(pos: tuple[int, int]) -> None:
-                nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows, last_drawn_panel_rows
+                nonlocal start_row, start_col, anchor_row, anchor_col, panel_rows
                 nonlocal initial_cursor_row, initial_cursor_col, last_refresh_query, last_refresh_results, last_refresh_query_rows
 
                 term_size = tty_terminal_size(fd)
@@ -1033,7 +1034,6 @@ def run(
                 anchor_row = next_anchor_row
                 anchor_col = next_anchor_col
                 panel_rows = next_panel_rows
-                last_drawn_panel_rows = panel_rows
 
                 render_width = terminal_safe_render_width(term_size.columns, next_anchor_col)
                 query_width = query_text_render_width(render_width)
@@ -1292,8 +1292,12 @@ def run(
                         1,
                         len(query_rows),
                     )
-                    desired_panel_rows = max(min_panel_rows, required_query_rows + min_result_rows)
                     max_panel_rows = max(1, term_lines - anchor_row + 1)
+                    desired_panel_rows = (
+                        max_panel_rows
+                        if results_expanded
+                        else max(min_panel_rows, required_query_rows + min_result_rows)
+                    )
                     if desired_panel_rows > max_panel_rows and anchor_row > 1:
                         extra_rows = min(desired_panel_rows - max_panel_rows, anchor_row - 1)
                         if extra_rows > 0:
@@ -1395,7 +1399,7 @@ def run(
                         render_line_cache=render_line_cache,
                     )
                     skip_previous_cursor_clear = False
-                    last_drawn_panel_rows = panel_rows
+                    last_drawn_panel_rows = query_rows_used + results_visible
                     # Keep the physical cursor at the stable prompt position
                     # while waiting for the next keypress.
                     term_write(move_to(start_row, start_col))
@@ -1487,6 +1491,10 @@ def run(
                         selected = max(0, selected - 1)
                         continue
                     if ev == "down":
+                        current_term_lines = tty_terminal_size(fd).lines
+                        available_panel_rows = max(1, current_term_lines - anchor_row + 1)
+                        if available_panel_rows > last_drawn_panel_rows:
+                            results_expanded = True
                         selected = min(max(0, len(results) - 1), selected + 1)
                         continue
                     if ev == "pgup":
