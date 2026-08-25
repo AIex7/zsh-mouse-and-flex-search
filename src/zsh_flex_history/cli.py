@@ -1499,6 +1499,8 @@ def run(
                                 cursor_pos = max(0, len(query) - trailing_text_length)
                                 if quote is not None:
                                     cursor_pos = max(token_start, cursor_pos - 1)
+                            elif query.endswith(("'", '"')):
+                                cursor_pos = max(0, cursor_pos - 1)
                             clear_selection()
                             sync_mouse_mode()
                             if preferred_runtime_row is None:

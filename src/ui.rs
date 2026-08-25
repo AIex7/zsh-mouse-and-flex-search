@@ -784,6 +784,8 @@ pub fn run(
                         if quote.is_some() {
                             cursor_pos = token_start.max(cursor_pos.saturating_sub(1));
                         }
+                    } else if matches!(query.chars().last(), Some('\'' | '"')) {
+                        cursor_pos = cursor_pos.saturating_sub(1);
                     }
                     sel_anchor = None;
                     sel_end = None;
