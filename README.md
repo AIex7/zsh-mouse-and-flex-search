@@ -62,6 +62,7 @@ zsh-flex-history-import
 - `Tab`: inserts selected command
 - `Enter`: print and optionally runs the selected command
 - `Alt-Enter`: insert a newline
+- `Shift-Enter`: insert a newline in terminals supporting the Kitty keyboard protocol
 - `Cmd-C` / `Cmd-V`: copy/paste query text in kitty while mouse takeover is active
 - `Opt-C` / `Opt-V`: copy/paste query text in non-kitty terminals
 - `Esc` or `Ctrl-C`: quit

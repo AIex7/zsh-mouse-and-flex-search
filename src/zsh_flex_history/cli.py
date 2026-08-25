@@ -567,7 +567,7 @@ def read_key(fd: int, timeout: Optional[float] = 0.1) -> tuple[str, object]:
             super_key = (mod - 1) & 8
 
             if codepoint == 13:
-                if alt:
+                if alt or shift:
                     return "char", "\n"
                 return "enter", None
             if codepoint == 9:

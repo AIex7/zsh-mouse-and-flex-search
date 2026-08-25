@@ -87,12 +87,13 @@ fn parse_csi_key(full: &[u8]) -> Option<InputEvent> {
         let body = &s[2..s.len() - 1];
         let (codepoint_s, mod_s) = body.split_once(';').unwrap_or((body, "1"));
         if let (Ok(codepoint), Ok(modifier)) = (codepoint_s.parse::<u32>(), mod_s.parse::<u32>()) {
+            let shift = (modifier.saturating_sub(1)) & 1 != 0;
             let ctrl = (modifier.saturating_sub(1)) & 4 != 0;
             let alt = (modifier.saturating_sub(1)) & 2 != 0;
             let super_key = (modifier.saturating_sub(1)) & 8 != 0;
 
             if codepoint == 13 {
-                return Some(if alt {
+                return Some(if alt || shift {
                     InputEvent::Char('\n')
                 } else {
                     InputEvent::Enter
@@ -387,6 +388,11 @@ mod tests {
     #[test]
     fn kitty_alt_enter_inserts_newline() {
         assert_eq!(parse_csi_key(b"\x1b[13;3u"), Some(InputEvent::Char('\n')));
+    }
+
+    #[test]
+    fn kitty_shift_enter_inserts_newline() {
+        assert_eq!(parse_csi_key(b"\x1b[13;2u"), Some(InputEvent::Char('\n')));
     }
 
     #[test]
