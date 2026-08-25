@@ -368,9 +368,10 @@ pub fn runtime_completion_matches(
             shell_escape_fragment(&chosen.name)
         };
         let completion_end = start + completed_token.chars().count()
-            - usize::from(chosen.is_dir)
             - usize::from(quote.is_some());
-        let completion_start = completion_end - encoded_name.chars().count();
+        let completion_start = completion_end
+            - encoded_name.chars().count()
+            - usize::from(chosen.is_dir);
 
         let completed_query_lower = completed_query.to_lowercase();
         runtime_matches.push(MatchResult {
@@ -447,7 +448,7 @@ mod tests {
     fn runtime_completion_handles_non_ascii_token_boundaries() {
         let entries = vec![DirectoryListingEntry {
             name: "café-file".to_string(),
-            is_dir: false,
+            is_dir: true,
         }];
         let query = "echo café";
 
@@ -460,8 +461,8 @@ mod tests {
         );
 
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].text, "echo caf\\é-file");
+        assert_eq!(matches[0].text, "echo caf\\é-file/");
         let (start, end) = matches[0].runtime_completion_span.unwrap();
-        assert_eq!(query_char_slice(&matches[0].text, start, end), "caf\\é-file");
+        assert_eq!(query_char_slice(&matches[0].text, start, end), "caf\\é-file/");
     }
 }

@@ -672,12 +672,12 @@ mod tests {
             cwd: None,
             text_lower: None,
             runtime_completion: true,
-            runtime_completion_span: Some((14, 20)),
+            runtime_completion_span: Some((14, 21)),
             failed: false,
             words: Vec::new(),
         };
 
         let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
-        assert!(rendered.contains("/desktop/this/\x1b[0m\x1b[34mnewdir\x1b[0m/"));
+        assert!(rendered.contains("/desktop/this/\x1b[0m\x1b[34mnewdir/\x1b[0m"));
     }
 }

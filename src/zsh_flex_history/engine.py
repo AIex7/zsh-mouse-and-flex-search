@@ -1124,8 +1124,8 @@ def runtime_completion_matches(
             if quote is not None
             else shell_escape_fragment(chosen.name)
         )
-        completion_end = start + len(completed_token) - int(chosen.is_dir) - int(quote is not None)
-        completion_start = completion_end - len(encoded_name)
+        completion_end = start + len(completed_token) - int(quote is not None)
+        completion_start = completion_end - len(encoded_name) - int(chosen.is_dir)
 
         completed_query_lower = completed_query.lower()
         runtime_matches.append(
