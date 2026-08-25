@@ -408,6 +408,7 @@ pub fn draw_panel(
     selected: usize,
     offset: usize,
     panel_rows: usize,
+    results_expanded: bool,
     width: usize,
     clear_previous_cursor: bool,
     status_message: &str,
@@ -536,25 +537,13 @@ pub fn draw_panel(
     let runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None);
     let selector_glyph = glyph_from_env(SELECTOR_GLYPH_ENV, SELECTOR_GLYPH);
     let failed_selector_glyph = glyph_from_env(FAILED_SELECTOR_GLYPH_ENV, FAILED_SELECTOR_GLYPH);
+    let separator_style = style(StyleOptions { dim: true, ..Default::default() });
 
-    let mut result_lines = Vec::new();
-    for i in 0..results_visible {
+    let mut result_lines = vec![String::new(); results_visible];
+    let visible_result_count = results_fitting_rows(results_visible, results_expanded)
+        .min(results.len().saturating_sub(offset));
+    for i in 0..visible_result_count {
         let idx = offset + i;
-        if idx >= results.len() {
-            if i == 0 && !status_message.is_empty() {
-                let status_style = style(StyleOptions {
-                    fg_rgb: Some(DORIC_FG_SHADOW_INTENSE),
-                    bg_rgb: Some(DORIC_BG_NEUTRAL),
-                    bold: true,
-                    ..Default::default()
-                });
-                result_lines.push(format!("{} {} {}", status_style, status_message, RESET));
-            } else {
-                result_lines.push(String::new());
-            }
-            continue;
-        }
-
         let item = &results[idx];
         let is_selected = idx == selected;
         let cache_key = format!(
@@ -592,7 +581,26 @@ pub fn draw_panel(
                 line
             }
         };
-        result_lines.push(format!("{}{}", result_padding, base_line));
+        let row = result_row_offset(i, results_expanded);
+        result_lines[row] = format!("{}{}", result_padding, base_line);
+        if results_expanded && i + 1 < visible_result_count && row + 1 < result_lines.len() {
+            result_lines[row + 1] = format!(
+                "{}{}{}{}",
+                result_padding,
+                separator_style,
+                "─".repeat(shared_result_width),
+                RESET
+            );
+        }
+    }
+    if visible_result_count == 0 && !status_message.is_empty() && !result_lines.is_empty() {
+        let status_style = style(StyleOptions {
+            fg_rgb: Some(DORIC_FG_SHADOW_INTENSE),
+            bg_rgb: Some(DORIC_BG_NEUTRAL),
+            bold: true,
+            ..Default::default()
+        });
+        result_lines[0] = format!("{} {} {}", status_style, status_message, RESET);
     }
 
     let (final_query_row_abs, final_query_col) = query_cursor_visual_position(query_rows, query_chars_count);

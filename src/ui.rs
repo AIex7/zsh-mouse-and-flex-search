@@ -600,7 +600,7 @@ pub fn run(
             Some(continuation_query_width),
             Some(&query_rows),
         );
-        let visible = layout_results_visible.max(1);
+        let visible = results_fitting_rows(layout_results_visible, results_expanded).max(1);
 
         let mut results;
         if let Some((indices, cached_res)) = match_cache.get(&query) {
@@ -677,6 +677,7 @@ pub fn run(
             selected,
             offset,
             panel_rows,
+            results_expanded,
             t_cols,
             !skip_previous_cursor_clear,
             status_message,
@@ -755,6 +756,11 @@ pub fn run(
         }
 
         let query_chars_count = query.chars().count();
+        let ev = if matches!(&ev, InputEvent::Right) && cursor_pos == query_chars_count {
+            InputEvent::Tab
+        } else {
+            ev
+        };
 
         match ev {
             InputEvent::Interrupt | InputEvent::Escape => {

@@ -221,6 +221,14 @@ def wrapped_query_layout(
     return query_start, query_view_len, query_rows_used, results_visible
 
 
+def result_row_offset(visible_index: int, expanded: bool) -> int:
+    return visible_index * 2 if expanded else visible_index
+
+
+def results_fitting_rows(available_rows: int, expanded: bool) -> int:
+    return (available_rows + 1) // 2 if expanded else available_rows
+
+
 def selection_bounds(sel_anchor: Optional[int], sel_end: Optional[int]) -> Optional[tuple[int, int]]:
     if sel_anchor is None or sel_end is None:
         return None
@@ -329,6 +337,7 @@ def draw_panel(
     offset: int,
     panel_rows: int,
     width: int,
+    results_expanded: bool = False,
     clear_previous_cursor: bool = True,
     status_message: str = "",
     debug_note: str = "",
@@ -433,17 +442,14 @@ def draw_panel(
     runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None)
     selector_glyph = glyph_from_env(SELECTOR_GLYPH_ENV, SELECTOR_GLYPH)
     failed_selector_glyph = glyph_from_env(FAILED_SELECTOR_GLYPH_ENV, FAILED_SELECTOR_GLYPH)
-    visible_result_count = min(results_visible, max(0, len(results) - offset))
-    for i in range(results_visible):
+    separator_style = style(dim=True)
+    result_lines = [""] * results_visible
+    visible_result_count = min(
+        results_fitting_rows(results_visible, results_expanded),
+        max(0, len(results) - offset),
+    )
+    for i in range(visible_result_count):
         idx = offset + i
-        if idx >= len(results):
-            if i == 0 and status_message:
-                result_lines.append(
-                    f"{style(fg_rgb=DORIC['fg_shadow_intense'], bg_rgb=DORIC['bg_neutral'], bold=True)} {status_message} {RESET}"
-                )
-            else:
-                result_lines.append("")
-            continue
         item = results[idx]
         is_selected = idx == selected
         cache_key = (
@@ -476,7 +482,17 @@ def draw_panel(
                 if len(render_line_cache) >= 2048:
                     render_line_cache.clear()
                 render_line_cache[cache_key] = base_line
-        result_lines.append(result_padding + base_line)
+        row = result_row_offset(i, results_expanded)
+        result_lines[row] = result_padding + base_line
+        if results_expanded and i + 1 < visible_result_count and row + 1 < len(result_lines):
+            result_lines[row + 1] = (
+                result_padding + separator_style + ("─" * shared_result_width) + RESET
+            )
+    if visible_result_count == 0 and status_message and result_lines:
+        result_lines[0] = (
+            f"{style(fg_rgb=DORIC['fg_shadow_intense'], bg_rgb=DORIC['bg_neutral'], bold=True)} "
+            f"{status_message} {RESET}"
+        )
 
     final_query_row_abs, final_query_col = query_cursor_visual_position(query_rows, len(query))
     final_query_row = final_query_row_abs - query_start
@@ -1346,7 +1362,10 @@ def run(
                         continuation_query_width,
                         query_rows,
                     )
-                    visible = max(1, layout_results_visible)
+                    visible = max(
+                        1,
+                        results_fitting_rows(layout_results_visible, results_expanded),
+                    )
                     cache_key = query
                     if cache_key in match_cache:
                         matched_indices, results = match_cache[cache_key]
@@ -1417,6 +1436,7 @@ def run(
                         offset,
                         panel_rows,
                         width,
+                        results_expanded=results_expanded,
                         clear_previous_cursor=not skip_previous_cursor_clear,
                         status_message=status_message,
                         debug_note=debug_note,
@@ -1460,6 +1480,8 @@ def run(
                     if ev == "enter":
                         chosen = query
                         break
+                    if ev == "right" and cursor_pos == len(query):
+                        ev = "tab"
                     if ev == "tab":
                         if 0 <= selected < len(results):
                             selected_result = results[selected]

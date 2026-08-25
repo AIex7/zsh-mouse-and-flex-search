@@ -59,7 +59,7 @@ zsh-flex-history-import
 ## Keys
 
 - `Up` / `Down` / Scroll: move selection
-- `Tab`: inserts selected command
+- `Tab` or `Right` at the end of the query: inserts selected command
 - `Enter`: print and optionally runs the selected command
 - `Alt-Enter`: insert a newline
 - `Shift-Enter`: insert a newline in terminals supporting the Kitty keyboard protocol
