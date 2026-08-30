@@ -393,6 +393,7 @@ mod tests {
             cwd: None,
             text_lower: None,
             runtime_completion,
+            history_match: !runtime_completion,
             runtime_completion_span: None,
             failed: false,
             words: Vec::new(),
@@ -406,6 +407,7 @@ mod tests {
             vec!["/repo/music", "other history", "/repo/music_manifest"]
         );
         assert!(merged[0].runtime_completion);
+        assert!(merged[0].history_match);
     }
 
     #[test]
@@ -418,6 +420,7 @@ mod tests {
             cwd: None,
             text_lower: None,
             runtime_completion,
+            history_match: !runtime_completion,
             runtime_completion_span: None,
             failed: false,
             words: Vec::new(),

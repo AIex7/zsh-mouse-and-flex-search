@@ -382,6 +382,7 @@ pub fn runtime_completion_matches(
             cwd: None,
             text_lower: Some(completed_query_lower),
             runtime_completion: true,
+            history_match: false,
             runtime_completion_span: Some((completion_start, completion_end)),
             failed: false,
             words: Vec::new(),

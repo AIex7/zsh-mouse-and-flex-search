@@ -174,6 +174,7 @@ pub struct MatchResult {
     pub cwd: Option<String>,
     pub text_lower: Option<String>,
     pub runtime_completion: bool,
+    pub history_match: bool,
     pub runtime_completion_span: Option<(usize, usize)>,
     pub failed: bool,
     pub words: Vec<String>,
@@ -340,13 +341,14 @@ fn render_result_line_with_glyphs(
         })
     );
 
-    let selector_style = if item.runtime_completion {
+    let runtime_only = item.runtime_completion && !item.history_match;
+    let selector_style = if runtime_only {
         style(StyleOptions { fg: runtime_color, bold: true, ..Default::default() })
     } else {
         style(StyleOptions { fg: result_color, bold: true, ..Default::default() })
     };
 
-    let selector_source = if item.runtime_completion {
+    let selector_source = if runtime_only {
         " "
     } else if item.failed {
         failed_selector_glyph
@@ -548,9 +550,10 @@ pub fn draw_panel(
         let item = &results[idx];
         let is_selected = idx == selected;
         let cache_key = format!(
-            "{}\t{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
+            "{}\t{}\t{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:?}",
             item.text,
             item.runtime_completion,
+            item.history_match,
             item.runtime_completion_span,
             item.failed,
             is_selected,
@@ -681,6 +684,7 @@ mod tests {
             cwd: None,
             text_lower: None,
             runtime_completion: true,
+            history_match: false,
             runtime_completion_span: Some((14, 21)),
             failed: false,
             words: Vec::new(),
@@ -689,5 +693,33 @@ mod tests {
         let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
         assert!(!rendered.contains('●'));
         assert!(rendered.contains("/desktop/this/\x1b[0m\x1b[34mnewdir/\x1b[0m"));
+    }
+
+    #[test]
+    fn runtime_completion_that_matches_history_keeps_history_glyph() {
+        let mut item = MatchResult {
+            text: "/desktop/this/newdir/".to_string(),
+            score: 0,
+            exact: false,
+            recency: 0,
+            cwd: None,
+            text_lower: None,
+            runtime_completion: true,
+            history_match: true,
+            runtime_completion_span: Some((14, 21)),
+            failed: false,
+            words: Vec::new(),
+        };
+
+        let successful = render_result_line_with_glyphs(
+            &item, false, 80, true, "", "●", "×", None, None,
+        );
+        assert!(successful.contains('●'));
+
+        item.failed = true;
+        let failed = render_result_line_with_glyphs(
+            &item, false, 80, true, "", "●", "×", None, None,
+        );
+        assert!(failed.contains('×'));
     }
 }
