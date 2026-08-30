@@ -346,7 +346,9 @@ fn render_result_line_with_glyphs(
         style(StyleOptions { fg: result_color, bold: true, ..Default::default() })
     };
 
-    let selector_source = if item.failed {
+    let selector_source = if item.runtime_completion {
+        " "
+    } else if item.failed {
         failed_selector_glyph
     } else {
         selector_glyph
@@ -685,6 +687,7 @@ mod tests {
         };
 
         let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
+        assert!(!rendered.contains('●'));
         assert!(rendered.contains("/desktop/this/\x1b[0m\x1b[34mnewdir/\x1b[0m"));
     }
 }

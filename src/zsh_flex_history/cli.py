@@ -296,7 +296,7 @@ def render_result_line(
         selector_style = style(fg=runtime_color, bold=True)
     else:
         selector_style = style(fg=result_color, bold=True)
-    selector_source = failed_selector_glyph if item.failed else selector_glyph
+    selector_source = " " if item.runtime_completion else (failed_selector_glyph if item.failed else selector_glyph)
     selector = selector_source[:1] or SELECTOR_GLYPH
     if selected:
         gutter = f"{selector_style}{selector}{RESET} "
