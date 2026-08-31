@@ -789,8 +789,14 @@ pub fn run(
                     } else if matches!(query.chars().last(), Some('\'' | '"')) {
                         cursor_pos = cursor_pos.saturating_sub(1);
                     }
-                    sel_anchor = None;
-                    sel_end = None;
+                    if let Some((start, end)) = quoted_http_selection(&query) {
+                        sel_anchor = Some(start);
+                        sel_end = Some(end);
+                        cursor_pos = end;
+                    } else {
+                        sel_anchor = None;
+                        sel_end = None;
+                    }
                     sync_mouse_mode(query.chars().count(), &mut mouse_enabled, &mut kitty_keyboard_enabled, fd);
                     if preferred_runtime_row.is_none() {
                         selected = 0;

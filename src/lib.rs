@@ -156,6 +156,22 @@ mod tests {
     }
 
     #[test]
+    fn quoted_http_urls_select_only_their_contents() {
+        assert_eq!(
+            quoted_http_selection(r#"open "https://example.com/a b""#),
+            Some((6, 29))
+        );
+        assert_eq!(quoted_http_selection("open 'http://example.com'"), Some((6, 24)));
+    }
+
+    #[test]
+    fn quoted_non_urls_and_unquoted_urls_are_not_selected() {
+        assert_eq!(quoted_http_selection(r#"echo "hello""#), None);
+        assert_eq!(quoted_http_selection("open https://example.com"), None);
+        assert_eq!(quoted_http_selection(r#"open "ftp://example.com""#), None);
+    }
+
+    #[test]
     fn flex_matching_subsequence() {
         let q: Vec<char> = "gst".chars().collect();
         assert!(match_flex(&q, "git status", "git status").is_some());

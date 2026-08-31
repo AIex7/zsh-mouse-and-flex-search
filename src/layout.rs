@@ -324,6 +324,24 @@ pub fn enclosing_quote(token: &str) -> (Option<char>, bool) {
     (Some(first), closes)
 }
 
+pub fn quoted_http_selection(query: &str) -> Option<(usize, usize)> {
+    let query_len = query.chars().count();
+    let (token_start, token_end) = token_bounds(query, query_len);
+    let token = query_char_slice(query, token_start, token_end);
+    let (_, closes_quote) = enclosing_quote(&token);
+    if !closes_quote {
+        return None;
+    }
+
+    let token_len = token.chars().count();
+    let contents = query_char_slice(&token, 1, token_len.saturating_sub(1));
+    if contents.starts_with("http://") || contents.starts_with("https://") {
+        Some((token_start + 1, token_end - 1))
+    } else {
+        None
+    }
+}
+
 pub fn shell_unescape_fragment(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
