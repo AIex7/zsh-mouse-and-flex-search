@@ -793,7 +793,7 @@ pub fn run(
                     } else if matches!(query.chars().last(), Some('\'' | '"')) {
                         cursor_pos = cursor_pos.saturating_sub(1);
                     }
-                    if let Some((start, end)) = quoted_value_selection(&query) {
+                    if let Some((start, end)) = completed_value_selection(&query) {
                         sel_anchor = Some(start);
                         sel_end = Some(end);
                         cursor_pos = end;
