@@ -158,17 +158,28 @@ mod tests {
     #[test]
     fn quoted_http_urls_select_only_their_contents() {
         assert_eq!(
-            quoted_http_selection(r#"open "https://example.com/a b""#),
+            quoted_value_selection(r#"open "https://example.com/a b""#),
             Some((6, 29))
         );
-        assert_eq!(quoted_http_selection("open 'http://example.com'"), Some((6, 24)));
+        assert_eq!(quoted_value_selection("open 'http://example.com'"), Some((6, 24)));
     }
 
     #[test]
-    fn quoted_non_urls_and_unquoted_urls_are_not_selected() {
-        assert_eq!(quoted_http_selection(r#"echo "hello""#), None);
-        assert_eq!(quoted_http_selection("open https://example.com"), None);
-        assert_eq!(quoted_http_selection(r#"open "ftp://example.com""#), None);
+    fn quoted_absolute_paths_select_only_their_contents() {
+        assert_eq!(
+            quoted_value_selection(r#"open "/Users/alex/My File""#),
+            Some((6, 25))
+        );
+        assert_eq!(quoted_value_selection("cd '/tmp/work'"), Some((4, 13)));
+    }
+
+    #[test]
+    fn other_quoted_and_unquoted_values_are_not_selected() {
+        assert_eq!(quoted_value_selection(r#"echo "hello""#), None);
+        assert_eq!(quoted_value_selection("open https://example.com"), None);
+        assert_eq!(quoted_value_selection(r#"open "ftp://example.com""#), None);
+        assert_eq!(quoted_value_selection(r#"open "relative/path""#), None);
+        assert_eq!(quoted_value_selection("open /tmp/work"), None);
     }
 
     #[test]
