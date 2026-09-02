@@ -331,22 +331,6 @@ impl PathCommandCache {
     pub fn contains(&self, word: &str) -> bool {
         self.sorted_executables.binary_search_by(|e| e.as_str().cmp(word)).is_ok()
     }
-
-    pub fn has_prefix(&self, prefix: &str) -> bool {
-        if prefix.is_empty() {
-            return false;
-        }
-        match self.sorted_executables.binary_search_by(|e| e.as_str().cmp(prefix)) {
-            Ok(_) => true,
-            Err(idx) => {
-                if idx < self.sorted_executables.len() {
-                    self.sorted_executables[idx].starts_with(prefix)
-                } else {
-                    false
-                }
-            }
-        }
-    }
 }
 
 pub fn is_executable_file(path_str: &str) -> bool {
@@ -373,7 +357,7 @@ pub enum CommandWordState {
     Error,
 }
 
-pub fn command_state(word: &str, word_complete: bool, path_cache: &PathCommandCache) -> CommandWordState {
+pub fn command_state(word: &str, _word_complete: bool, path_cache: &PathCommandCache) -> CommandWordState {
     if word.is_empty() || is_ambiguous_command(word) {
         return CommandWordState::Pending;
     }
@@ -386,16 +370,6 @@ pub fn command_state(word: &str, word_complete: bool, path_cache: &PathCommandCa
         }
     } else if path_cache.contains(word) {
         return CommandWordState::Valid;
-    }
-
-    if !word_complete {
-        if KEYWORDS.iter().any(|k| k.starts_with(word))
-            || BUILTINS.iter().any(|b| b.starts_with(word))
-            || path_cache.has_prefix(word)
-        {
-            return CommandWordState::Pending;
-        }
-        return CommandWordState::Error;
     }
 
     CommandWordState::Error
