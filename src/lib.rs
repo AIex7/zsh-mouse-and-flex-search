@@ -85,6 +85,21 @@ mod tests {
     }
 
     #[test]
+    fn binary_path_commands_request_and_response_round_trip() {
+        let req_frame = serialize_path_commands_request_bytes("/custom/bin:/usr/bin", "/repo").unwrap();
+        assert_eq!(&req_frame[..4], &FRAME_MAGIC);
+        let (path_env, cwd) = parse_path_commands_request_bytes(&req_frame).unwrap();
+        assert_eq!(path_env, "/custom/bin:/usr/bin");
+        assert_eq!(cwd, "/repo");
+
+        let commands = vec!["cargo".to_string(), "git".to_string(), "zsh".to_string()];
+        let resp_frame = serialize_path_commands_response_bytes(&commands).unwrap();
+        assert_eq!(&resp_frame[..4], &FRAME_MAGIC);
+        let parsed = parse_path_commands_response_bytes(&resp_frame).unwrap();
+        assert_eq!(parsed, commands);
+    }
+
+    #[test]
     fn compact_word_field_does_not_enlarge_native_candidate_layout() {
         assert_eq!(
             std::mem::size_of::<CompactWords>(),
@@ -337,6 +352,14 @@ mod tests {
         assert_eq!(tokens[0], KEYWORD); // if
         assert_eq!(tokens[8], STRING);  // '
         assert_eq!(tokens[16], OPERATOR); // |
+    }
+
+    #[test]
+    fn syntax_highlighter_with_commands_uses_provided_list() {
+        let mut hl = IncrementalHighlighter::with_commands(vec!["mycustomtool".to_string()]);
+        let tokens = hl.highlight("mycustomtool --flag");
+        assert_eq!(tokens[0], COMMAND); // mycustomtool recognized as command
+        assert_eq!(tokens[13], OPTION); // --flag
     }
 
     #[test]

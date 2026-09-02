@@ -210,7 +210,11 @@ pub fn run(
     let current_cwd_path = PathBuf::from(&current_cwd_text);
 
     let mut query = String::new();
-    let mut syntax_highlighter = IncrementalHighlighter::new();
+    let current_path_env = std::env::var("PATH").unwrap_or_default();
+    let path_commands = history_client
+        .get_path_commands(&current_path_env, &current_cwd_text)
+        .unwrap_or_default();
+    let mut syntax_highlighter = IncrementalHighlighter::with_commands(path_commands);
     let mut last_refresh_query: Option<String> = None;
     let mut last_refresh_results: Vec<String> = Vec::new();
     let mut last_refresh_query_rows = 1;

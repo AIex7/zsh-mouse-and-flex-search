@@ -362,6 +362,21 @@ impl HistoryDaemonClient {
         };
         parse_search_response_bytes(&resp_bytes)
     }
+
+    pub fn get_path_commands(&self, path_env: &str, cwd: &str) -> Option<Vec<String>> {
+        let req_bytes = serialize_path_commands_request_bytes(path_env, cwd).ok()?;
+        let resp_bytes = daemon_exchange_bytes(&self.socket_path.to_string_lossy(), &req_bytes, Duration::from_millis(500));
+        let resp_bytes = match resp_bytes {
+            Some(b) => b,
+            None => {
+                if !self.ensure_running() {
+                    return None;
+                }
+                daemon_exchange_bytes(&self.socket_path.to_string_lossy(), &req_bytes, Duration::from_millis(500))?
+            }
+        };
+        parse_path_commands_response_bytes(&resp_bytes)
+    }
 }
 
 pub fn launch_history_daemon(
@@ -457,6 +472,19 @@ pub fn run_history_daemon(
     let _ = fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600));
     daemon_debug_log(debug, &format!("daemon listening on {} (history={})", socket_path.display(), history_path.display()));
 
+    let default_path_env = std::env::var("PATH").unwrap_or_default();
+    let default_cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut default_dirs: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for dir in default_path_env.split(':') {
+        default_dirs.insert(crate::syntax_highlighting::resolve_path_dir(dir, &default_cwd));
+    }
+    let default_commands = crate::syntax_highlighting::scan_path_executables(&default_path_env, &default_cwd);
+    let default_commands_frame = serialize_path_commands_response_bytes(&default_commands)
+        .expect("path commands response frame serializes");
+    let mut custom_path_cache: std::collections::HashMap<(String, String), Vec<u8>> = std::collections::HashMap::new();
+
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(s) => s,
@@ -484,6 +512,44 @@ pub fn run_history_daemon(
             if valid {
                 let pong = FrameWriter::new(FRAME_PONG_RESPONSE).finish().unwrap();
                 let _ = write_daemon_message(&mut stream, &pong);
+            } else {
+                let _ = write_daemon_message(&mut stream, &error_frame("invalid request"));
+            }
+            continue;
+        }
+
+        if kind == FRAME_PATH_COMMANDS_REQUEST {
+            let req_data = parse_path_commands_request_bytes(&raw);
+            if let Some((client_path_env, client_cwd)) = req_data {
+                let cache_key = (client_path_env, client_cwd);
+                if cache_key.0.is_empty() || cache_key.0 == default_path_env {
+                    let _ = write_daemon_message(&mut stream, &default_commands_frame);
+                } else if let Some(cached_frame) = custom_path_cache.get(&cache_key) {
+                    let _ = write_daemon_message(&mut stream, cached_frame);
+                } else {
+                    let mut merged_set: std::collections::HashSet<String> = default_commands.iter().cloned().collect();
+                    let mut has_new_dirs = false;
+                    for dir_str in cache_key.0.split(':') {
+                        let resolved = crate::syntax_highlighting::resolve_path_dir(dir_str, &cache_key.1);
+                        if !default_dirs.contains(&resolved) {
+                            has_new_dirs = true;
+                            crate::syntax_highlighting::scan_single_directory_executables(&resolved, &mut merged_set);
+                        }
+                    }
+                    let frame_bytes = if has_new_dirs {
+                        let mut sorted: Vec<String> = merged_set.into_iter().collect();
+                        sorted.sort();
+                        serialize_path_commands_response_bytes(&sorted).unwrap_or_else(|_| default_commands_frame.clone())
+                    } else {
+                        default_commands_frame.clone()
+                    };
+
+                    if custom_path_cache.len() >= 32 {
+                        custom_path_cache.clear();
+                    }
+                    custom_path_cache.insert(cache_key, frame_bytes.clone());
+                    let _ = write_daemon_message(&mut stream, &frame_bytes);
+                }
             } else {
                 let _ = write_daemon_message(&mut stream, &error_frame("invalid request"));
             }

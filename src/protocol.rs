@@ -7,8 +7,10 @@ pub const FRAME_MAGIC: [u8; 4] = *b"ZFH\x02";
 pub const FRAME_HEADER_BYTES: usize = 8;
 pub const FRAME_PING_REQUEST: u8 = 1;
 pub const FRAME_SEARCH_REQUEST: u8 = 2;
+pub const FRAME_PATH_COMMANDS_REQUEST: u8 = 3;
 pub const FRAME_SEARCH_RESPONSE: u8 = 0x81;
 pub const FRAME_PONG_RESPONSE: u8 = 0x82;
+pub const FRAME_PATH_COMMANDS_RESPONSE: u8 = 0x83;
 pub const FRAME_ERROR_RESPONSE: u8 = 0xff;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,6 +208,16 @@ pub fn parse_search_response_bytes(raw: &[u8]) -> Option<ParsedResponse> {
     reader.done().then_some((results, matched_indices))
 }
 
+pub fn parse_path_commands_response_bytes(frame: &[u8]) -> Option<Vec<String>> {
+    let mut reader = FrameReader::new(frame, FRAME_PATH_COMMANDS_RESPONSE)?;
+    let count = reader.u32()?;
+    let mut commands = Vec::with_capacity(count);
+    for _ in 0..count {
+        commands.push(reader.string()?);
+    }
+    reader.done().then_some(commands)
+}
+
 pub fn serialize_search_request_bytes(
     query: &str,
     candidate_indices: Option<&[usize]>,
@@ -233,6 +245,32 @@ pub fn serialize_ping_request_bytes() -> Vec<u8> {
     FrameWriter::new(FRAME_PING_REQUEST)
         .finish()
         .expect("fixed ping frame fits")
+}
+
+pub fn parse_path_commands_request_bytes(frame: &[u8]) -> Option<(String, String)> {
+    let mut reader = FrameReader::new(frame, FRAME_PATH_COMMANDS_REQUEST)?;
+    if reader.done() {
+        return Some((String::new(), String::new()));
+    }
+    let path_env = reader.string()?;
+    let cwd = reader.string()?;
+    reader.done().then_some((path_env, cwd))
+}
+
+pub fn serialize_path_commands_request_bytes(path_env: &str, cwd: &str) -> Result<Vec<u8>, &'static str> {
+    let mut writer = FrameWriter::new(FRAME_PATH_COMMANDS_REQUEST);
+    writer.string(path_env)?;
+    writer.string(cwd)?;
+    writer.finish()
+}
+
+pub fn serialize_path_commands_response_bytes(commands: &[String]) -> Result<Vec<u8>, &'static str> {
+    let mut writer = FrameWriter::new(FRAME_PATH_COMMANDS_RESPONSE);
+    writer.u32(commands.len())?;
+    for cmd in commands {
+        writer.string(cmd)?;
+    }
+    writer.finish()
 }
 
 pub fn read_daemon_message(stream: &mut UnixStream) -> Option<Vec<u8>> {

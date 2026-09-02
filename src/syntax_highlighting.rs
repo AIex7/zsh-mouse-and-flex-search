@@ -259,51 +259,71 @@ pub struct PathCommandCache {
     sorted_executables: Vec<String>,
 }
 
-impl PathCommandCache {
-    pub fn refresh_if_needed(&mut self, path_env: &str, cwd: &str) {
-        if self.cached_path_env == path_env && self.cached_cwd == cwd {
-            return;
+pub fn resolve_path_dir(dir: &str, cwd: &str) -> PathBuf {
+    if dir.is_empty() {
+        if cwd.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(cwd)
         }
-        let mut names = HashSet::new();
-        let mut scanned = HashSet::new();
-        for dir in path_env.split(':') {
-            let resolved = if dir.is_empty() {
-                if cwd.is_empty() {
-                    PathBuf::from(".")
-                } else {
-                    PathBuf::from(cwd)
-                }
-            } else if Path::new(dir).is_relative() {
-                if cwd.is_empty() {
-                    PathBuf::from(dir)
-                } else {
-                    Path::new(cwd).join(dir)
-                }
-            } else {
-                PathBuf::from(dir)
-            };
-            if !scanned.insert(resolved.clone()) {
-                continue;
-            }
-            if let Ok(entries) = fs::read_dir(&resolved) {
-                for entry in entries.flatten() {
-                    if let Ok(file_type) = entry.file_type() {
-                        if file_type.is_file() || file_type.is_symlink() {
-                            if let Ok(metadata) = entry.metadata() {
-                                if metadata.permissions().mode() & 0o111 != 0 {
-                                    if let Ok(name) = entry.file_name().into_string() {
-                                        names.insert(name);
-                                    }
-                                }
+    } else if Path::new(dir).is_relative() {
+        if cwd.is_empty() {
+            PathBuf::from(dir)
+        } else {
+            Path::new(cwd).join(dir)
+        }
+    } else {
+        PathBuf::from(dir)
+    }
+}
+
+pub fn scan_single_directory_executables(dir: &Path, names: &mut HashSet<String>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_file() || file_type.is_symlink() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.permissions().mode() & 0o111 != 0 {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                names.insert(name);
                             }
                         }
                     }
                 }
             }
         }
-        let mut sorted: Vec<String> = names.into_iter().collect();
-        sorted.sort();
-        self.sorted_executables = sorted;
+    }
+}
+
+pub fn scan_path_executables(path_env: &str, cwd: &str) -> Vec<String> {
+    let mut names = HashSet::new();
+    let mut scanned = HashSet::new();
+    for dir in path_env.split(':') {
+        let resolved = resolve_path_dir(dir, cwd);
+        if !scanned.insert(resolved.clone()) {
+            continue;
+        }
+        scan_single_directory_executables(&resolved, &mut names);
+    }
+    let mut sorted: Vec<String> = names.into_iter().collect();
+    sorted.sort();
+    sorted
+}
+
+impl PathCommandCache {
+    pub fn from_sorted_executables(sorted_executables: Vec<String>) -> Self {
+        Self {
+            cached_path_env: String::new(),
+            cached_cwd: String::new(),
+            sorted_executables,
+        }
+    }
+
+    pub fn refresh_if_needed(&mut self, path_env: &str, cwd: &str) {
+        if self.cached_path_env == path_env && self.cached_cwd == cwd && !self.sorted_executables.is_empty() {
+            return;
+        }
+        self.sorted_executables = scan_path_executables(path_env, cwd);
         self.cached_path_env = path_env.to_string();
         self.cached_cwd = cwd.to_string();
     }
@@ -616,12 +636,21 @@ impl Default for IncrementalHighlighter {
 
 impl IncrementalHighlighter {
     pub fn new() -> Self {
-        let mut path_cache = PathCommandCache::default();
-        let path_env = std::env::var("PATH").unwrap_or_default();
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default();
-        path_cache.refresh_if_needed(&path_env, &cwd);
+        Self::with_commands(Vec::new())
+    }
+
+    pub fn with_commands(commands: Vec<String>) -> Self {
+        let path_cache = if !commands.is_empty() {
+            PathCommandCache::from_sorted_executables(commands)
+        } else {
+            let mut cache = PathCommandCache::default();
+            let path_env = std::env::var("PATH").unwrap_or_default();
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            cache.refresh_if_needed(&path_env, &cwd);
+            cache
+        };
         Self {
             query: Vec::new(),
             tokens: Vec::new(),
