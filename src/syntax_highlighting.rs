@@ -366,38 +366,6 @@ pub fn is_executable_file(path_str: &str) -> bool {
     }
 }
 
-pub fn is_existing_path_prefix(text: &str) -> bool {
-    if text.is_empty() || (!text.contains('/') && !text.starts_with('~')) {
-        return false;
-    }
-    let expanded = if text.starts_with('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            format!("{}{}", home, &text[1..])
-        } else {
-            text.to_string()
-        }
-    } else {
-        text.to_string()
-    };
-    let (base_dir, name_prefix) = if let Some(last_slash) = expanded.rfind('/') {
-        let parent = if last_slash == 0 { "/" } else { &expanded[..last_slash] };
-        let prefix = &expanded[last_slash + 1..];
-        (parent, prefix)
-    } else {
-        (".", expanded.as_str())
-    };
-    if let Ok(entries) = fs::read_dir(base_dir) {
-        for entry in entries.flatten() {
-            if let Ok(name) = entry.file_name().into_string() {
-                if name.starts_with(name_prefix) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum CommandWordState {
     Valid,
@@ -424,7 +392,6 @@ pub fn command_state(word: &str, word_complete: bool, path_cache: &PathCommandCa
         if KEYWORDS.iter().any(|k| k.starts_with(word))
             || BUILTINS.iter().any(|b| b.starts_with(word))
             || path_cache.has_prefix(word)
-            || is_existing_path_prefix(word)
         {
             return CommandWordState::Pending;
         }

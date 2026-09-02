@@ -53,8 +53,17 @@ pub fn cached_directory_listing(directory: &Path) -> Option<Vec<DirectoryListing
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
-                || fs::metadata(entry.path()).map(|m| m.is_dir()).unwrap_or(false);
+            let is_dir = if let Ok(ft) = entry.file_type() {
+                if ft.is_dir() {
+                    true
+                } else if ft.is_symlink() {
+                    fs::metadata(entry.path()).map(|m| m.is_dir()).unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
             entries.push(DirectoryListingEntry { name, is_dir });
         }
     } else {
