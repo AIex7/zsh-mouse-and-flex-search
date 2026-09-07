@@ -719,6 +719,11 @@ pub fn run(
             continue;
         }
 
+        if ev == InputEvent::Closed {
+            clear_panel_and_restore_cursor(fd, start_row, start_col, anchor_row, anchor_col, inline_with_prompt, true, &mut mouse_enabled, &mut kitty_keyboard_enabled);
+            return None;
+        }
+
         // prepare_for_keypress
         let reported = query_cursor_position(fd);
         if let Some(rep) = reported {
@@ -768,7 +773,7 @@ pub fn run(
         };
 
         match ev {
-            InputEvent::Interrupt | InputEvent::Escape => {
+            InputEvent::Interrupt | InputEvent::Escape | InputEvent::Closed => {
                 clear_panel_and_restore_cursor(fd, start_row, start_col, anchor_row, anchor_col, inline_with_prompt, true, &mut mouse_enabled, &mut kitty_keyboard_enabled);
                 return None;
             }

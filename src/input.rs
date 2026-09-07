@@ -1,11 +1,12 @@
 use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 
-use crate::terminal::select_readable;
+use crate::terminal::{select_readable, select_readable_checked};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     Interrupt,
+    Closed,
     Escape,
     Enter,
     Tab,
@@ -296,12 +297,24 @@ fn read_utf8_char(fd: RawFd, first_byte: u8) -> char {
 
 pub fn read_key(fd: RawFd, timeout: Option<Duration>) -> InputEvent {
     loop {
-        if !select_readable(fd, timeout) {
-            return InputEvent::Timeout;
+        match select_readable_checked(fd, timeout) {
+            Ok(true) => {},
+            Ok(false) => return InputEvent::Timeout,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return InputEvent::Closed,
         }
-        let Some(ch) = read_exact_one_byte(fd) else {
-            continue;
-        };
+        let mut byte = [0u8; 1];
+        let n = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+        if n == 0 {
+            return InputEvent::Closed;
+        }
+        if n < 0 {
+            match std::io::Error::last_os_error().kind() {
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock => continue,
+                _ => return InputEvent::Closed,
+            }
+        }
+        let ch = byte[0];
 
         if ch == 3 {
             return InputEvent::Interrupt;
@@ -414,6 +427,59 @@ pub fn read_key(fd: RawFd, timeout: Option<Duration>) -> InputEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_input_closes_promptly(fd: RawFd) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let event = read_key(fd, None);
+            unsafe { libc::close(fd); }
+            let _ = tx.send(event);
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).expect("input did not exit after disconnect"),
+            InputEvent::Closed,
+        );
+    }
+
+    #[test]
+    fn input_eof_exits() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe { libc::close(fds[1]); }
+        assert_input_closes_promptly(fds[0]);
+    }
+
+    #[test]
+    fn terminal_disconnect_exits() {
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(unsafe {
+            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+        }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let event = read_key(slave, None);
+            unsafe { libc::close(slave); }
+            let _ = tx.send(event);
+        });
+        // Close the terminal while the reader is waiting for keyboard input.
+        std::thread::sleep(Duration::from_millis(50));
+        unsafe { libc::close(master); }
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).expect("terminal reader hung"), InputEvent::Closed);
+    }
+
+    #[test]
+    fn invalid_input_exits() {
+        assert_eq!(read_key(-1, None), InputEvent::Closed);
+    }
+
+    #[test]
+    fn idle_input_times_out_without_closing() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        assert_eq!(read_key(fds[0], Some(Duration::from_millis(10))), InputEvent::Timeout);
+        unsafe { libc::close(fds[0]); libc::close(fds[1]); }
+    }
 
     #[test]
     fn kitty_alt_enter_inserts_newline() {

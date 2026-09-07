@@ -120,8 +120,12 @@ impl Drop for RawTerminal {
 }
 
 pub fn select_readable(fd: RawFd, timeout: Option<Duration>) -> bool {
+    select_readable_checked(fd, timeout).unwrap_or(false)
+}
+
+pub fn select_readable_checked(fd: RawFd, timeout: Option<Duration>) -> std::io::Result<bool> {
     if fd < 0 || fd >= libc::FD_SETSIZE as RawFd {
-        return false;
+        return Err(std::io::Error::from_raw_os_error(libc::EBADF));
     }
     unsafe {
         let mut readfds: libc::fd_set = std::mem::zeroed();
@@ -148,7 +152,11 @@ pub fn select_readable(fd: RawFd, timeout: Option<Duration>) -> bool {
             std::ptr::null_mut(),
             tv_ptr,
         );
-        res > 0 && libc::FD_ISSET(fd, &readfds)
+        if res < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(res > 0 && libc::FD_ISSET(fd, &readfds))
+        }
     }
 }
 
