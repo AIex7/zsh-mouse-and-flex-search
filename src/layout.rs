@@ -227,11 +227,11 @@ pub fn wrapped_query_layout(
 }
 
 pub fn result_row_offset(visible_index: usize) -> usize {
-    visible_index.saturating_mul(2).saturating_add(1)
+    visible_index
 }
 
 pub fn results_fitting_rows(available_rows: usize) -> usize {
-    available_rows / 2
+    available_rows
 }
 
 pub fn selection_bounds(sel_anchor: Option<usize>, sel_end: Option<usize>) -> Option<(usize, usize)> {

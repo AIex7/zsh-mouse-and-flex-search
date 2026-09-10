@@ -540,7 +540,6 @@ pub fn draw_panel(
     let runtime_color = ansi_color_from_env("ZSH_FLEX_HISTORY_RUNTIME_COLOR", None);
     let selector_glyph = glyph_from_env(SELECTOR_GLYPH_ENV, SELECTOR_GLYPH);
     let failed_selector_glyph = glyph_from_env(FAILED_SELECTOR_GLYPH_ENV, FAILED_SELECTOR_GLYPH);
-    let separator_style = style(StyleOptions { dim: true, ..Default::default() });
 
     let mut result_lines = vec![String::new(); results_visible];
     let visible_result_count = results_fitting_rows(results_visible)
@@ -587,15 +586,6 @@ pub fn draw_panel(
         };
         let row = result_row_offset(i);
         result_lines[row] = format!("{}{}", result_padding, base_line);
-        if row > 0 {
-            result_lines[row - 1] = format!(
-                "{}{}{}{}",
-                result_padding,
-                separator_style,
-                "─".repeat(shared_result_width),
-                RESET
-            );
-        }
     }
     if visible_result_count == 0 && !status_message.is_empty() && !result_lines.is_empty() {
         let status_style = style(StyleOptions {

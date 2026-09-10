@@ -155,13 +155,13 @@ mod tests {
     }
 
     #[test]
-    fn results_always_use_every_other_terminal_row() {
-        assert_eq!(result_row_offset(0), 1);
-        assert_eq!(result_row_offset(1), 3);
-        assert_eq!(result_row_offset(2), 5);
-        assert_eq!(results_fitting_rows(7), 3);
-        assert_eq!(results_fitting_rows(5), 2);
-        assert_eq!(results_fitting_rows(4), 2);
+    fn results_use_consecutive_terminal_rows() {
+        assert_eq!(result_row_offset(0), 0);
+        assert_eq!(result_row_offset(1), 1);
+        assert_eq!(result_row_offset(2), 2);
+        assert_eq!(results_fitting_rows(7), 7);
+        assert_eq!(results_fitting_rows(5), 5);
+        assert_eq!(results_fitting_rows(4), 4);
     }
 
     #[test]

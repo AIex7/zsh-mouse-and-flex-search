@@ -90,7 +90,7 @@ pub fn run(
         }
     };
 
-    let min_result_rows: usize = 4;
+    let min_result_rows: usize = 3;
     let min_panel_rows: usize = 1 + min_result_rows;
 
     let _rt = match RawTerminal::enter(fd, opened_tty_fd.is_some()) {
@@ -482,7 +482,7 @@ pub fn run(
         let q_width = query_text_render_width(r_width, 1);
         let cont_width = terminal_safe_render_width(cols, 1);
         let (q_start, _, q_rows_used, _) = wrapped_query_layout(query_str, c_pos, q_width, next_panel_rows, Some(cont_width), None);
-        let current_results: Vec<String> = results_list.iter().take(2).map(|i| i.text.clone()).collect();
+        let current_results: Vec<String> = results_list.iter().take(min_result_rows).map(|i| i.text.clone()).collect();
 
         if last_ref_query.as_deref() != Some(query_str) {
             let q_rows = build_query_visual_rows(query_str, q_width, Some(cont_width));
@@ -862,7 +862,10 @@ pub fn run(
                 let available_panel_rows = current_term_lines
                     .saturating_sub(anchor_row)
                     .saturating_add(1);
-                if available_panel_rows > last_drawn_panel_rows {
+                if selected + 1 >= offset + visible
+                    && selected + 1 < results.len()
+                    && available_panel_rows > last_drawn_panel_rows
+                {
                     results_expanded = true;
                 }
                 selected = (selected + 1).min(results.len().saturating_sub(1));
