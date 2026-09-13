@@ -658,6 +658,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn result_suffix_clearing_preserves_unchanged_prefix() {
+        assert_eq!(result_changed_suffix_col("abcdef", "abzdef", 5), 8);
+        assert_eq!(result_changed_suffix_col("界old", "界new", 5), 8);
+        assert_eq!(result_changed_suffix_col("abcdef", "abc", 5), 9);
+        assert_eq!(result_changed_suffix_col("existing", "", 5), 1);
+    }
+
+    #[test]
     fn result_newlines_use_visible_symbol() {
         assert_eq!(terminal_safe_result_text("one\ntwo"), "one\\ntwo");
         assert_eq!(terminal_safe_result_text("one\r\ntwo"), "one\\ntwo");
