@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 
@@ -270,6 +271,54 @@ pub fn result_changed_suffix_col(previous: &str, current: &str, anchor_col: usiz
     3 + result_padding_width + text_display_width(&safe_prefix)
 }
 
+fn result_display_text_and_span(item: &MatchResult) -> (Cow<'_, str>, Option<(usize, usize)>) {
+    let Some((start, end)) = item.runtime_completion_span.filter(|_| item.runtime_completion) else {
+        return (Cow::Borrowed(&item.text), item.runtime_completion_span);
+    };
+
+    let mut completed_chars = item
+        .text
+        .chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .peekable();
+    let mut has_escaped_space = false;
+    while let Some(ch) = completed_chars.next() {
+        if ch == '\\' && completed_chars.peek() == Some(&' ') {
+            has_escaped_space = true;
+            break;
+        }
+    }
+    if !has_escaped_space {
+        return (Cow::Borrowed(&item.text), Some((start, end)));
+    }
+
+    let mut displayed = String::with_capacity(item.text.len());
+    let mut chars = item.text.chars().enumerate().peekable();
+    let mut removed = 0;
+    while let Some((index, ch)) = chars.next() {
+        if start <= index
+            && index < end
+            && ch == '\\'
+            && chars.peek().is_some_and(|(next_index, next)| {
+                *next_index < end && *next == ' '
+            })
+        {
+            displayed.push(' ');
+            chars.next();
+            removed += 1;
+        } else {
+            displayed.push(ch);
+        }
+    }
+
+    (Cow::Owned(displayed), Some((start, end.saturating_sub(removed))))
+}
+
+pub fn result_display_text(item: &MatchResult) -> Cow<'_, str> {
+    result_display_text_and_span(item).0
+}
+
 pub fn render_result_line(
     item: &MatchResult,
     selected: bool,
@@ -316,11 +365,12 @@ fn render_result_line_with_glyphs(
         0
     };
     let body_width = width.saturating_sub(gutter_width + suffix_width);
-    let display_text = terminal_safe_result_text(&item.text);
+    let (display_source, display_completion_span) = result_display_text_and_span(item);
+    let display_text = terminal_safe_result_text(&display_source);
     let text = truncate_text(&display_text, body_width);
-    let completion_span = item.runtime_completion_span.map(|(start, end)| {
-        let prefix = query_char_slice(&item.text, 0, start);
-        let completed = query_char_slice(&item.text, start, end);
+    let completion_span = display_completion_span.map(|(start, end)| {
+        let prefix = query_char_slice(&display_source, 0, start);
+        let completed = query_char_slice(&display_source, start, end);
         let display_start = terminal_safe_result_text(&prefix).chars().count();
         let display_end = display_start + terminal_safe_result_text(&completed).chars().count();
         (display_start, display_end)
@@ -691,6 +741,31 @@ mod tests {
         let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
         assert!(!rendered.contains('●'));
         assert!(rendered.contains("/desktop/this/\x1b[0m\x1b[34mnewdir/\x1b[0m"));
+    }
+
+    #[test]
+    fn runtime_completion_hides_space_escape_only_in_completed_display_span() {
+        let item = MatchResult {
+            text: "cd old\\ path/new\\ folder/".to_string(),
+            score: 0,
+            exact: false,
+            recency: 0,
+            cwd: None,
+            text_lower: None,
+            runtime_completion: true,
+            history_match: false,
+            runtime_completion_span: Some((13, 25)),
+            failed: false,
+            words: Vec::new(),
+        };
+
+        assert_eq!(result_display_text(&item), "cd old\\ path/new folder/");
+        let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
+        assert_eq!(strip_sgr_escapes(&rendered), "  cd old\\ path/new folder/");
+        assert!(rendered.contains(
+            "cd old\\ path/\x1b[0m\x1b[34mnew folder/\x1b[0m"
+        ));
+        assert_eq!(item.text, "cd old\\ path/new\\ folder/");
     }
 
     #[test]

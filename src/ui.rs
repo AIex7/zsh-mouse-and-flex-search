@@ -482,7 +482,11 @@ pub fn run(
         let q_width = query_text_render_width(r_width, 1);
         let cont_width = terminal_safe_render_width(cols, 1);
         let (q_start, _, q_rows_used, _) = wrapped_query_layout(query_str, c_pos, q_width, next_panel_rows, Some(cont_width), None);
-        let current_results: Vec<String> = results_list.iter().take(min_result_rows).map(|i| i.text.clone()).collect();
+        let current_results: Vec<String> = results_list
+            .iter()
+            .take(min_result_rows)
+            .map(|item| result_display_text(item).into_owned())
+            .collect();
 
         if last_ref_query.as_deref() != Some(query_str) {
             let q_rows = build_query_visual_rows(query_str, q_width, Some(cont_width));
