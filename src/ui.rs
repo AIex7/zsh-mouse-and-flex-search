@@ -625,7 +625,6 @@ pub fn run(
             results = filter_exact_query_match(&query, displayed_results.clone());
         }
 
-        let runtime_limit = 3;
         let runtime_cache_key = (query.clone(), cursor_pos);
         let runtime_completions = match runtime_completion_cache.get(&runtime_cache_key) {
             Some(comp) => comp.clone(),
@@ -644,7 +643,12 @@ pub fn run(
                 comp
             }
         };
-        results = insert_runtime_completions(results, runtime_completions, runtime_limit);
+        let runtime_completion_count = runtime_completions.len();
+        results = insert_runtime_completions(
+            results,
+            runtime_completions,
+            runtime_completion_count,
+        );
 
         if let Some(row_pref) = preferred_runtime_row {
             if row_pref < results.len() && results[row_pref].runtime_completion {
