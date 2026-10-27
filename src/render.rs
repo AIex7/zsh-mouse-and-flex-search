@@ -282,14 +282,14 @@ fn result_display_text_and_span(item: &MatchResult) -> (Cow<'_, str>, Option<(us
         .skip(start)
         .take(end.saturating_sub(start))
         .peekable();
-    let mut has_escaped_space = false;
+    let mut has_escapes = false;
     while let Some(ch) = completed_chars.next() {
-        if ch == '\\' && completed_chars.peek() == Some(&' ') {
-            has_escaped_space = true;
+        if ch == '\\' && completed_chars.peek().is_some() {
+            has_escapes = true;
             break;
         }
     }
-    if !has_escaped_space {
+    if !has_escapes {
         return (Cow::Borrowed(&item.text), Some((start, end)));
     }
 
@@ -300,12 +300,10 @@ fn result_display_text_and_span(item: &MatchResult) -> (Cow<'_, str>, Option<(us
         if start <= index
             && index < end
             && ch == '\\'
-            && chars.peek().is_some_and(|(next_index, next)| {
-                *next_index < end && *next == ' '
-            })
+            && chars.peek().is_some_and(|(next_index, _)| *next_index < end)
         {
-            displayed.push(' ');
-            chars.next();
+            let (_, next_ch) = chars.next().unwrap();
+            displayed.push(next_ch);
             removed += 1;
         } else {
             displayed.push(ch);
@@ -744,8 +742,30 @@ mod tests {
     }
 
     #[test]
-    fn runtime_completion_hides_space_escape_only_in_completed_display_span() {
+    fn runtime_completion_hides_escapes_only_in_completed_display_span() {
         let item = MatchResult {
+            text: "cd old\\ path/new\\ \\(folder\\)/".to_string(),
+            score: 0,
+            exact: false,
+            recency: 0,
+            cwd: None,
+            text_lower: None,
+            runtime_completion: true,
+            history_match: false,
+            runtime_completion_span: Some((13, 29)),
+            failed: false,
+            words: Vec::new(),
+        };
+
+        assert_eq!(result_display_text(&item), "cd old\\ path/new (folder)/");
+        let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
+        assert_eq!(strip_sgr_escapes(&rendered), "  cd old\\ path/new (folder)/");
+        assert!(rendered.contains(
+            "cd old\\ path/\x1b[0m\x1b[34mnew (folder)/\x1b[0m"
+        ));
+        assert_eq!(item.text, "cd old\\ path/new\\ \\(folder\\)/");
+
+        let space_item = MatchResult {
             text: "cd old\\ path/new\\ folder/".to_string(),
             score: 0,
             exact: false,
@@ -759,13 +779,13 @@ mod tests {
             words: Vec::new(),
         };
 
-        assert_eq!(result_display_text(&item), "cd old\\ path/new folder/");
-        let rendered = render_result_line(&item, false, 80, true, "", "●", None, None);
-        assert_eq!(strip_sgr_escapes(&rendered), "  cd old\\ path/new folder/");
-        assert!(rendered.contains(
+        assert_eq!(result_display_text(&space_item), "cd old\\ path/new folder/");
+        let rendered_space = render_result_line(&space_item, false, 80, true, "", "●", None, None);
+        assert_eq!(strip_sgr_escapes(&rendered_space), "  cd old\\ path/new folder/");
+        assert!(rendered_space.contains(
             "cd old\\ path/\x1b[0m\x1b[34mnew folder/\x1b[0m"
         ));
-        assert_eq!(item.text, "cd old\\ path/new\\ folder/");
+        assert_eq!(space_item.text, "cd old\\ path/new\\ folder/");
     }
 
     #[test]
