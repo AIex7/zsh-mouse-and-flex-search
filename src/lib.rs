@@ -192,25 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn unquoted_absolute_paths_select_the_entire_escaped_token() {
-        assert_eq!(
-            completed_value_selection(r#"open /Users/alex/My\ File"#),
-            Some((5, 25))
-        );
-        assert_eq!(completed_value_selection("cd /tmp/work"), Some((3, 12)));
-    }
-
-    #[test]
-    fn quoted_absolute_paths_select_only_their_contents() {
-        assert_eq!(
-            completed_value_selection(r#"open "/Users/alex/My File""#),
-            Some((6, 25))
-        );
-        assert_eq!(completed_value_selection("cd '/tmp/work'"), Some((4, 13)));
-    }
-
-    #[test]
-    fn other_quoted_and_unquoted_values_are_not_selected() {
+    fn paths_and_other_values_are_not_selected() {
+        assert_eq!(completed_value_selection(r#"open /Users/alex/My\ File"#), None);
+        assert_eq!(completed_value_selection("cd /tmp/work"), None);
+        assert_eq!(completed_value_selection(r#"open "/Users/alex/My File""#), None);
+        assert_eq!(completed_value_selection("cd '/tmp/work'"), None);
         assert_eq!(completed_value_selection(r#"echo "hello""#), None);
         assert_eq!(completed_value_selection(r#"open "ftp://example.com""#), None);
         assert_eq!(completed_value_selection(r#"open "relative/path""#), None);

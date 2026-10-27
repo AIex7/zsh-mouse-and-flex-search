@@ -330,10 +330,7 @@ pub fn completed_value_selection(query: &str) -> Option<(usize, usize)> {
     let token = query_char_slice(query, token_start, token_end);
     let (_, closes_quote) = enclosing_quote(&token);
     if !closes_quote {
-        return if token.starts_with("http://")
-            || token.starts_with("https://")
-            || token.starts_with('/')
-        {
+        return if token.starts_with("http://") || token.starts_with("https://") {
             Some((token_start, token_end))
         } else {
             None
@@ -342,10 +339,7 @@ pub fn completed_value_selection(query: &str) -> Option<(usize, usize)> {
 
     let token_len = token.chars().count();
     let contents = query_char_slice(&token, 1, token_len.saturating_sub(1));
-    if contents.starts_with("http://")
-        || contents.starts_with("https://")
-        || contents.starts_with('/')
-    {
+    if contents.starts_with("http://") || contents.starts_with("https://") {
         Some((token_start + 1, token_end - 1))
     } else {
         None
