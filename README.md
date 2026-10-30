@@ -55,6 +55,8 @@ zsh-flex-history-import
   - Sets the glyph shown beside normal results. Defaults to `●`.
 - `ZSH_FLEX_HISTORY_FAILED_SELECTOR_GLYPH`
   - Sets the glyph shown beside failed commands. Defaults to `○`.
+- `ZSH_FLEX_HISTORY_NO_MOUSE`
+  - When set (e.g. `1` or `true`), prevents taking over the mouse in the terminal. Also accepts `ZSH_FLEX_HISTORY_DISABLE_MOUSE=1` or `ZSH_FLEX_HISTORY_MOUSE=0`.
     
 ## Keys
 

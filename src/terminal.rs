@@ -58,6 +58,38 @@ pub fn supports_kitty_keyboard_protocol() -> bool {
     term.contains("kitty")
 }
 
+pub fn mouse_takeover_enabled_from<F>(lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let is_truthy = |var: &str| -> bool {
+        match lookup(var) {
+            Some(val) => {
+                let s = val.trim().to_lowercase();
+                !s.is_empty() && s != "0" && s != "false" && s != "no" && s != "off"
+            }
+            None => false,
+        }
+    };
+
+    if is_truthy("ZSH_FLEX_HISTORY_NO_MOUSE") || is_truthy("ZSH_FLEX_HISTORY_DISABLE_MOUSE") {
+        return false;
+    }
+
+    if let Some(val) = lookup("ZSH_FLEX_HISTORY_MOUSE") {
+        let s = val.trim().to_lowercase();
+        if s == "0" || s == "false" || s == "no" || s == "off" {
+            return false;
+        }
+    }
+
+    true
+}
+
+pub fn mouse_takeover_enabled() -> bool {
+    mouse_takeover_enabled_from(|name| std::env::var(name).ok())
+}
+
 pub struct RawTerminal {
     fd: RawFd,
     old_termios: Option<libc::termios>,
@@ -546,5 +578,21 @@ mod terminal_tests {
     fn pasted_text_removes_terminal_sequences_and_preserves_newlines() {
         let raw = "one\x1b[31m\ntwo\x1b]52;c;payload\x07three\x1bPprivate\x1b\\four\x07";
         assert_eq!(normalize_pasted_text(raw), "one\ntwothreefour");
+    }
+
+    #[test]
+    fn mouse_takeover_enabled_by_default() {
+        assert!(mouse_takeover_enabled_from(|_| None));
+        assert!(mouse_takeover_enabled_from(|v| if v == "ZSH_FLEX_HISTORY_NO_MOUSE" { Some("0".to_string()) } else { None }));
+        assert!(mouse_takeover_enabled_from(|v| if v == "ZSH_FLEX_HISTORY_NO_MOUSE" { Some("false".to_string()) } else { None }));
+    }
+
+    #[test]
+    fn mouse_takeover_disabled_when_env_var_set() {
+        assert!(!mouse_takeover_enabled_from(|v| if v == "ZSH_FLEX_HISTORY_NO_MOUSE" { Some("1".to_string()) } else { None }));
+        assert!(!mouse_takeover_enabled_from(|v| if v == "ZSH_FLEX_HISTORY_NO_MOUSE" { Some("true".to_string()) } else { None }));
+        assert!(!mouse_takeover_enabled_from(|v| if v == "ZSH_FLEX_HISTORY_DISABLE_MOUSE" { Some("1".to_string()) } else { None }));
+        assert!(!mouse_takeover_enabled_from(|v| if v == "ZSH_FLEX_HISTORY_MOUSE" { Some("0".to_string()) } else { None }));
+        assert!(!mouse_takeover_enabled_from(|v| if v == "ZSH_FLEX_HISTORY_MOUSE" { Some("false".to_string()) } else { None }));
     }
 }

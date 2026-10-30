@@ -310,6 +310,7 @@ pub fn run(
     });
 
     let mut queued_search_key: Option<String> = None;
+    let mouse_takeover_allowed = mouse_takeover_enabled();
     let mut mouse_enabled = false;
     let mut mouse_selecting = false;
     let mut kitty_keyboard_enabled = false;
@@ -360,7 +361,7 @@ pub fn run(
                            m_en: &mut bool,
                            k_en: &mut bool,
                            fd: RawFd| {
-        let should_enable = query_chars > 0;
+        let should_enable = mouse_takeover_allowed && query_chars > 0;
         if should_enable && !*m_en {
             term_write(fd, ENABLE_MOUSE);
             if kitty_keyboard_supported && !*k_en {
@@ -1019,6 +1020,9 @@ pub fn run(
                 }
             }
             InputEvent::Mouse { bstate, x: mx, y: my, action } => {
+                if !mouse_takeover_allowed {
+                    continue;
+                }
                 if bstate & 64 != 0 {
                     if action == 'M' {
                         let wheel_button = bstate & 3;
